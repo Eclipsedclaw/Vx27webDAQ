@@ -32,7 +32,7 @@ def check(args) -> int:
     crate = None
     if args.simulate is not None:
         from alab_daq.daq.sim import Crate
-        crate = Crate(args.simulate, "none", {b.name: b.model for b in cfg.boards})
+        crate = Crate(args.simulate, "none", {b.name: b.model for b in cfg.boards}, {b.name: len(b.channels) for b in cfg.boards})
     code = 0
     for b in boards:
         t0 = time.monotonic()

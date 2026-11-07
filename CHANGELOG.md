@@ -5,6 +5,10 @@ What changed in each version of ALAB DAQ. Write the notes of the next version un
 
 ## Unreleased
 
+## v0.0.3 (2026-11-07)
+
+- Master trigger: the lab's setup. A new trigger setup, the master self-triggers and the others follow: the first board (the VX2730) triggers on its own channels and sends its trigger on TRG-OUT (ITLA, or AcceptTrg: only the triggers it took); the VX2740s take it on TRG-IN and pass it on. Each board has its own number of channels (a VX2730 with 16 inputs), with **Use what the boards said** to take model and channels from the board check; the starting configuration is the lab's (VX2730 at 192.168.0.72, VX2740s at .75 and .85, the same 4.096 µs window); thresholds and the threshold lines only where a board triggers on its own channels. README: the boards' network (192.168.0.x).
+
 ## v0.0.2 (2026-11-07)
 
 - Ubuntu and GitHub: only code goes into git: .gitignore keeps out every data file wherever it lands (`*.raw`, `*.root`, `*.evt`, `*.log`, `data/`, `runs/`, run records, configurations saved into this folder), and a test fails if git tracks anything but code, scripts and their documents, or a file over 200 kB. setup.sh checks for Python 3.11 or newer and its venv module (Ubuntu: python3-venv) and takes `PYTHON=...`; caen_libs.sh names the Ubuntu packages; the README installs on Ubuntu from the GitHub repository (PyPI has every pinned version for Python 3.11-3.13).

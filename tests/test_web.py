@@ -391,7 +391,12 @@ class ConfigTests(WebTestCase):
         r = await self.client.post("/api/config/save", json={"path": os.path.join(self.root, "x.conf")}, headers=CHANGE)
         self.assertEqual(r.status, 400)                                  # a configuration is a .json file
         r = await self.client.post("/api/config/new", headers=CHANGE)
-        self.assertTrue((await r.json())["dirty"])
+        new = await r.json()
+        self.assertTrue(new["dirty"])
+        self.assertEqual([(b["name"], len(b["channels"])) for b in new["config"]["boards"]],
+                         [("vx2730", 16), ("vx2740a", 64), ("vx2740b", 64)])          # the lab's setup
+        self.assertEqual(([p["role"] for p in new["plans"]], [b["self_trigger"] for b in new["boards"]]),
+                         (["master", "middle", "last"], [True, False, False]))
         r = await self.client.post("/api/config/open", json={"path": path}, headers=CHANGE)
         payload = await r.json()
         self.assertEqual((payload["note"], payload["dirty"], payload["path"]), (NOTE, False, path))

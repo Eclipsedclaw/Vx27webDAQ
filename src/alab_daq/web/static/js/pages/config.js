@@ -9,6 +9,7 @@ import { CONF_FILES, basename, chip, choosePath, clear, confirmDialog, dialog, f
 import { ROLE_NAMES, SETUP_NAMES, viewerNotice } from "./run.js";
 
 const SETUP_TEXT = {
+  master: T("Cables: CLK-OUT → CLK-IN and TRG-OUT → TRG-IN from the first board (the master, e.g. the VX2730) to the next, and so on along the chain. The master triggers on its own channels (the logic below) and sends its trigger out on TRG-OUT; every other board records when it arrives at its TRG-IN and passes it on. Every board records the same moments; the boards further down get the trigger a few ns later (a fixed delay: give them a little more pre-trigger)."),
   external: T("Cables: a trigger pulse into TRG-IN of the first board; TRG-OUT of each board into TRG-IN of the next one. Every board records every trigger, so the trigger IDs of the boards agree; the boards further down the chain get the trigger a few ns later (a fixed delay)."),
   self: T("No trigger cables. Each board triggers when its own channels fire (the logic below). With the clock chain the boards share one clock and start together, so their timestamps agree and events of different boards can be matched by time."),
   logic_or: T("Cables: TRG-OUT of every board into a logic unit (for example a CAEN V976 making the OR), and its outputs back into TRG-IN of every board, with cables of the same length. Each board sends out its channel triggers; every board records the common trigger."),
@@ -21,6 +22,7 @@ const SYNC_TEXT = {
 const PERIODIC = [["software", T("software trigger")], ["test_pulse", T("test pulse")]];
 const TARGETS = [["each", T("each board")], ["chain", T("master, passed on TRG-OUT → TRG-IN")]];
 const LOGIC_TEXT = { OR: T("any channel"), AND: T("all channels"), Majority: T("at least N channels") };
+const MASTER_OUT_TEXT = { ITLA: T("its channel trigger (ITLA)"), AcceptTrg: T("the triggers it took (AcceptTrg)") };
 
 function fmtNs(ns) {
   if (ns === null || ns === undefined || !Number.isFinite(ns)) return "—";
@@ -164,7 +166,13 @@ export function configPage(root, app) {
                                { disabled: !can, label: t("trigger setup") });
     inputs["trigger.setup"] = setupSeg;
     tg.append(...field(t("trigger setup"), setupSeg), h("span"), h("span.hint.hint-cell.explain-line", t(SETUP_TEXT[g.setup] || "")));
-    if (g.setup === "self" || g.setup === "logic_or") {
+    if (g.setup === "master") {
+      const out = segmented(c.master_outs.map((x) => [x, t(MASTER_OUT_TEXT[x])]), g.master_out, (v) => { g.master_out = v; edited(true); build(); },
+                            { disabled: !can, label: t("the master sends") });
+      inputs["trigger.master_out"] = out;
+      tg.append(...field(t("the master sends"), out, t("on TRG-OUT. ITLA: its channel trigger, at once. AcceptTrg: only the triggers it took (none while it is busy), so every board keeps the master's trigger IDs. Try both on the boards and compare the trigger IDs on the Run page")));
+    }
+    if (g.setup === "self" || g.setup === "logic_or" || g.setup === "master") {
       const logic = segmented(c.logics.map((l) => [l, `${l} · ${t(LOGIC_TEXT[l])}`]), g.logic, (v) => { g.logic = v; edited(true); build(); },
                               { disabled: !can, label: t("channel logic") });
       inputs["trigger.logic"] = logic;
@@ -202,6 +210,8 @@ export function configPage(root, app) {
       h("div.card-head", h("h2.card-title", t("Boards")),
         h("span.card-sub", t("In the order of the chain: the first board switched on is the master.")),
         h("span.spacer"),
+        h("button.btn.btn-sm", { type: "button", disabled: !can, onclick: adoptChecked, title: t("Each board's model and number of channels as the last Check boards read them") },
+          icon("check"), t("Use what the boards said")),
         h("button.btn.btn-sm", { type: "button", disabled: !can, onclick: sameWindow, title: t("The same record length and pre-trigger in time on every board (a V2730 samples every 2 ns, a V2740 every 8 ns)") },
           icon("sliders"), t("Same window on all…")),
         h("button.btn.btn-sm", { type: "button", disabled: !can, onclick: setAllThresholds, title: t("One threshold and pulse direction for every channel of every board") },
@@ -240,8 +250,10 @@ export function configPage(root, app) {
       ...field(t("name"), text(() => b.name, (v) => { b.name = v; }, `boards[${i}].name`, "120px"), t("in file names and on the page: letters, digits, _ . -")),
       ...field(t("address"), text(() => b.uri, (v) => { b.uri = v; }, `boards[${i}].uri`, "min(320px, 100%)"),
                t("dig2://IP-ADDRESS (Ethernet) or dig2://usb:PID (USB 3); the factory address is 192.168.0.254")),
-      ...field(t("model"), select(choices.map((m) => [m, m]), () => b.model, (v) => { b.model = v; }, `boards[${i}].model`),
+      ...field(t("model"), select(choices.map((m) => [m, m]), () => b.model, (v) => { b.model = v; b.n_channels = 0; }, `boards[${i}].model`),
                t((c.models.find((m) => b.model.includes(m.family)) || {}).text || "")),
+      ...field(t("channels"), number(() => b.n_channels || info.channels || 0, (v) => { b.n_channels = v; }, `boards[${i}].n_channels`, { lo: 1, hi: 64, width: "90px", rebuild: true }),
+               t("its inputs, as Check boards reads them: 64 on a VX2740, 32 or 16 on a VX2730")),
       ...field(t("record length"), [number(() => b.record_length, (v) => { b.record_length = v; }, `boards[${i}].record_length`, { lo: 4, hi: 6250000, width: "120px" }),
                                     h("span.text2", t("samples")), h("span.live", { id: `live-rec-${i}` })]),
       ...field(t("pre-trigger"), [number(() => b.pre_trigger, (v) => { b.pre_trigger = v; }, `boards[${i}].pre_trigger`, { lo: 0, hi: 6250000, width: "120px" }),
@@ -263,7 +275,7 @@ export function configPage(root, app) {
   }
 
   function channelEditor(b, i, info) {
-    const self = app.state.config.uses_self_trigger;
+    const self = Boolean(info.self_trigger);         // this board triggers on its own channels
     const nch = b.channels.length;
     const on = b.channels.filter((x) => x.enabled).length;
     const box = h("details.cfg-channels", { ontoggle: () => store(`config.channels.${i}`, box.open ? "1" : null) },
@@ -349,6 +361,23 @@ export function configPage(root, app) {
   }
 
   // ---- whole-configuration helpers ----
+  function adoptChecked() {
+    const res = (app.state.boards && app.state.boards.results) || [];
+    let n = 0;
+    for (const b of model.boards) {
+      const r = res.find((x) => x.name === b.name && x.ok && x.facts && !x.stale);
+      if (!r) continue;
+      const f = r.facts, fam = (f.model || "").replace(/\D/g, "").slice(0, 4);
+      if (f.model && app.state.config.models.some((m) => m.family === fam)) b.model = f.model;
+      if (f.channels) b.n_channels = f.channels;
+      n += 1;
+    }
+    if (!n) { toast(t("No board answered the last check: press Check boards on the Run page first"), "error"); return; }
+    edited(true);
+    build();
+    toast(t("Model and channels of {n} boards taken from the last check", { n }), "ok");
+  }
+
   function addBoard() {
     const used = new Set(model.boards.map((b) => b.name));
     let k = model.boards.length;

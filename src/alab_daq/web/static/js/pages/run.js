@@ -12,7 +12,7 @@ const BOARD_STATES = { waiting: ["", T("waiting")], connecting: ["busy pulse", T
                        configuring: ["busy pulse", T("configuring")], configured: ["busy", T("configured")],
                        armed: ["busy", T("armed")], running: ["ok", T("running")], stopping: ["busy pulse", T("stopping")],
                        stopped: ["", T("stopped")], error: ["error", T("error")] };
-export const SETUP_NAMES = { external: T("common external trigger"), self: T("each board self-triggers"),
+export const SETUP_NAMES = { master: T("the master self-triggers, the others follow"), external: T("common external trigger"), self: T("each board self-triggers"),
                              logic_or: T("OR in a logic unit"), periodic: T("periodic") };
 export const ROLE_NAMES = { master: T("master"), middle: T("chain"), last: T("end of chain"), single: T("on its own") };
 const QUIET_S = 5;

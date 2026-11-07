@@ -47,7 +47,7 @@ class Station:
         self.clients: set[Client] = set()
         self.activity_log: deque = deque(maxlen=500)
         self._load_activity()
-        self.cfg, self.cfg_path, self.run_note = C.default_config(), "", ""
+        self.cfg, self.cfg_path, self.run_note = C.lab_setup(), "", ""
         self.cfg_dirty, self.cfg_version = False, 0
         if not self._load_draft() and self.settings.config_file:
             self._open_config(self.settings.config_file, quiet=True)
@@ -179,12 +179,14 @@ class Station:
                          "pre_ns": ns * b.pre_trigger if ns else None, "event_bytes": C.event_bytes(b),
                          "channels": len(b.channels), "adc_max": m.adc_max if m else None,
                          "decimation": bool(m and m.decimation), "gain": bool(m and m.gain),
-                         "place": order.get(b.name)})
+                         "place": order.get(b.name), "usual_channels": m.channels if m else None,
+                         "self_trigger": C.triggers_on_channels(cfg, order.get(b.name) if b.enabled else None)})
         return {"version": self.cfg_version, "path": self.cfg_path, "dirty": self.cfg_dirty, "note": self.run_note,
                 "config": C.to_dict(cfg), "problems": [asdict(p) for p in problems], "plans": plans,
                 "boards": info, "models": models.table(), "model_choices": models.CHOICES,
                 "decimations": list(models.DECIMATIONS), "setups": list(C.SETUPS), "sync_modes": list(C.SYNC_MODES),
                 "logics": list(C.LOGICS), "io_levels": list(C.IO_LEVELS), "max_boards": C.MAX_BOARDS,
+                "master_outs": list(C.MASTER_OUTS),
                 "uses_self_trigger": C.uses_self_trigger(cfg), "start_order": C.start_order(cfg) if active else [],
                 "software_targets": C.software_targets(cfg) if active else []}
 
@@ -233,7 +235,7 @@ class Station:
         self.config_changed()
 
     def new_config(self, user: str) -> None:
-        self.cfg, self.cfg_path, self.cfg_dirty = C.default_config(), "", True
+        self.cfg, self.cfg_path, self.cfg_dirty = C.lab_setup(), "", True
         self.activity(user, "started a new configuration")
         self.config_changed()
 

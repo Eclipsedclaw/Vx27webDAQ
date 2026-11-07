@@ -228,6 +228,33 @@ class ConfigTests(unittest.TestCase):
         facts = {"b0": {"model": "V2745"}}
         self.assertIn("boards[0].model", {p.where for p in C.check_config(C.default_config(), check_paths=False, facts=facts)})
 
+    def test_lab_setup(self):
+        """The VX2730 (16 inputs) self-triggers as the master; the VX2740s take its trigger on TRG-IN and pass it on."""
+        cfg = C.lab_setup()
+        self.assertEqual([(b.model, len(b.channels), b.uri) for b in cfg.boards],
+                         [("VX2730", 16, "dig2://192.168.0.72"), ("VX2740", 64, "dig2://192.168.0.75"),
+                          ("VX2740", 64, "dig2://192.168.0.85")])
+        self.assertEqual([p for p in C.check_config(cfg, check_paths=False) if p.level == "error"], [])
+        self.assertEqual({round(b.record_length * C.sample_ns(b)) for b in cfg.boards}, {4096})     # one window
+        v = [self.values(cfg, k) for k in range(3)]
+        self.assertEqual([(x["/par/AcqTriggerSource"], x["/par/TrgOutMode"]) for x in v],
+                         [("ITLA", "ITLA"), ("TrgIn", "TrgIn"), ("TrgIn", "Disabled")])
+        self.assertEqual((v[0]["/ch/0..15/par/TriggerThr"], v[0]["/ch/0..15/par/ITLConnect"]), ("-100", "ITLA"))
+        self.assertNotIn("/par/ITLAMainLogic", v[1])                       # only the master triggers on channels
+        self.assertFalse(any("TriggerThr" in p for p in v[2]))
+        self.assertEqual([C.triggers_on_channels(cfg, k) for k in range(3)], [True, False, False])
+        cfg.trigger.master_out = "AcceptTrg"
+        self.assertEqual(self.values(cfg, 0)["/par/TrgOutMode"], "AcceptTrg")
+        # a board that says it has 32 channels where the configuration has 16
+        where = {p.where for p in C.check_config(cfg, check_paths=False, facts={"vx2730": {"model": "VX2730", "channels": 32}})}
+        self.assertIn("boards[0].n_channels", where)
+        d = C.to_dict(cfg)
+        d["boards"][0]["n_channels"] = 32
+        self.assertEqual(len(C.from_dict(d).boards[0].channels), 32)
+        d["boards"][0]["n_channels"] = 65
+        with self.assertRaises(C.ConfigError):
+            C.from_dict(d)
+
     def test_models(self):
         self.assertEqual(models.family("VX2740"), "2740")
         self.assertEqual(models.family("DT2730B"), "2730")
@@ -316,6 +343,27 @@ class DaqRunTests(unittest.TestCase):
             for h in heads[1:]:
                 self.assertTrue(np.array_equal(h["trigger_id"], heads[0]["trigger_id"]), setup)
                 self.assertTrue(np.array_equal(h["timestamp"], heads[0]["timestamp"]), setup)
+
+    def test_master_trigger(self):
+        """The lab's setup: the master's self-trigger, on TRG-OUT -> TRG-IN, makes every board record the same moments."""
+        for out in ("ITLA", "AcceptTrg"):
+            cfg = small(C.lab_setup())
+            cfg.trigger.master_out = out
+            code, log, status, d = run_daq(f"master_{out}", cfg)
+            self.assertEqual(code, 0, log)
+            heads = {}
+            for name, path in self.files(d).items():
+                with R.RawFile(path) as f:
+                    heads[name] = f.headers()
+                    if "vx2730" in name:
+                        self.assertEqual(f.header["board"]["channels"], 16)
+                        self.assertEqual(f.event(0).channels, [0, 1, 2, 3])
+            self.assertEqual(sorted(heads), ["run00007_vx2730.raw", "run00007_vx2740a.raw", "run00007_vx2740b.raw"])
+            master = heads["run00007_vx2730.raw"]
+            self.assertGreater(len(master["trigger_id"]), 10)
+            for name, h in heads.items():
+                self.assertTrue(np.array_equal(h["trigger_id"], master["trigger_id"]), (out, name))
+                self.assertTrue(np.array_equal(h["timestamp"], master["timestamp"]), (out, name))
 
     def test_periodic(self):
         cfg = small(C.default_config())

@@ -217,11 +217,12 @@ class Run:
         self.set_phase("connecting")
         if self.simulate is not None:
             from alab_daq.daq.sim import Crate
-            cabling = {"external": "chain", "logic_or": "or_unit"}.get(self.cfg.trigger.setup, "none")
+            cabling = {"external": "chain", "logic_or": "or_unit", "master": "chain"}.get(self.cfg.trigger.setup, "none")
             if self.cfg.trigger.setup == "periodic" and self.cfg.trigger.software_target == "chain":
                 cabling = "chain"
             try:
-                self.crate = Crate(self.simulate, cabling, {b.name: b.cfg.model for b in self.boards})
+                self.crate = Crate(self.simulate, cabling, {b.name: b.cfg.model for b in self.boards},
+                                   {b.name: len(b.cfg.channels) for b in self.boards})
             except ValueError as err:
                 self.log(str(err), "error")
                 return False
@@ -258,7 +259,8 @@ class Run:
             return f"it is a {f['model']}; the configuration says {br.cfg.model}: correct the model there"
         br.model = models.from_board(f) if f.get("channels") else models.model(br.cfg.model)
         if f.get("channels") and f["channels"] != len(br.cfg.channels):
-            return f"it has {f['channels']} channels; the configuration has {len(br.cfg.channels)}"
+            return (f"it has {f['channels']} channels; the configuration has {len(br.cfg.channels)}: set its channels "
+                    f"to {f['channels']} on the Configuration page (or Use what the boards said)")
         return ""
 
     def apply(self, br: BoardRun, s: C.Setting, refused: set) -> bool:

@@ -136,7 +136,8 @@ def board_lines(cfg: C.DaqConfig | None, board: C.Board | None, status: dict | N
     pre = src.get("pre_trigger") if src.get("pre_trigger") is not None else (board.pre_trigger if board else None)
     sns = src.get("sample_ns") or (C.sample_ns(board, m) if board else m.sample_ns)
     bits = src.get("adc_bits") or m.adc_bits
-    used = bool(cfg and C.uses_self_trigger(cfg))
+    k = next((j for j, (_, x) in enumerate(cfg.active()) if board is not None and x.name == board.name), None) if cfg else None
+    used = bool(cfg and C.triggers_on_channels(cfg, k))      # only a board that triggers on its own channels
     lines = []
     n = len(board.channels) if board else int(src.get("channels") or m.channels)
     for c in range(n):

@@ -12,8 +12,11 @@ synchronization is CAEN's recipe for a CLK-OUT -> CLK-IN daisy chain of Digitize
     all: EnAutoDisarmAcq = True; every board is armed, then only the master gets SwStartAcquisition (and
     SwStopAcquisition): the run signal travels on the clock cable, RunDelay lines the starts up.
 
-The trigger setups are the three multi-board examples of the WaveDump2 manual (UM7934, Appendix A), and a
-periodic trigger for pedestal and test runs:
+The trigger setups: the lab's usual one (master), the three multi-board examples of the WaveDump2 manual
+(UM7934, Appendix A), and a periodic trigger for pedestal and test runs:
+    master     the first board (e.g. the VX2730) triggers on its own channels and sends its trigger on TRG-OUT;
+               every other board takes it on TRG-IN and passes it on TRG-OUT -> TRG-IN (master_out: ITLA, or
+               AcceptTrg = only the triggers the master took)
     external   a trigger into the first board's TRG-IN, passed on TRG-OUT -> TRG-IN; every board takes it
     self       every board triggers on its own channels (the ITLA logic: OR, AND or majority of them)
     logic_or   every board sends its channel triggers out on TRG-OUT into a logic unit (e.g. a V976 OR), whose
@@ -37,7 +40,8 @@ from alab_daq.core import models
 
 FORMAT = "alab-daq-config"
 VERSION = 1
-SETUPS = ("external", "self", "logic_or", "periodic")
+SETUPS = ("master", "external", "self", "logic_or", "periodic")
+MASTER_OUTS = ("ITLA", "AcceptTrg")
 SYNC_MODES = ("chain", "independent")
 LOGICS = ("OR", "AND", "Majority")
 IO_LEVELS = ("NIM", "TTL")
@@ -69,6 +73,7 @@ class Board:
     name: str = "b0"
     uri: str = "dig2://192.168.0.254"
     model: str = "V2740"        # what the board is meant to be (the simulator makes one; a real one is checked)
+    n_channels: int = 0         # its inputs; 0: the model's usual number (a VX2730 may have 16 instead of 32)
     enabled: bool = True
     record_length: int = 1024   # samples
     pre_trigger: int = 128      # samples before the trigger
@@ -92,6 +97,7 @@ class Trigger:
     test_pulse_width_ns: int = 128
     io_level: str = "NIM"
     busy_veto: bool = False     # GPIO of all boards wired together: a busy board vetoes all (NIM only)
+    master_out: str = "ITLA"    # setup "master": what the master sends on TRG-OUT
 
 
 @dataclass
@@ -138,11 +144,12 @@ class Setting:
 
 
 # ---- defaults ----
-def channels_for(model_name: str, old: list | None = None) -> list[Channel]:
+def channels_for(model_name: str, old: list | None = None, n: int = 0) -> list[Channel]:
+    """n channels (0: the model's usual number), the old ones kept."""
     m = models.model(model_name) or models.MODELS["2740"]
     old = old or []
     base = old[-1] if old else Channel()
-    return [copy.deepcopy(old[c]) if c < len(old) else copy.deepcopy(base) for c in range(m.channels)]
+    return [copy.deepcopy(old[c]) if c < len(old) else copy.deepcopy(base) for c in range(n or m.channels)]
 
 
 def default_config() -> DaqConfig:
@@ -153,6 +160,20 @@ def default_config() -> DaqConfig:
         if models.family(b.model) == "2730":
             b.record_length, b.pre_trigger = 4096, 512          # the same 8.192 µs window at 2 ns
     return DaqConfig(boards=boards)
+
+
+def lab_setup() -> DaqConfig:
+    """The lab's setup (2026-11-07): the VX2730 (16 inputs, 500 MS/s) at 192.168.0.72 is the master: it
+    self-triggers and its CLK and TRG go along the chain to the VX2740s (64 inputs, 125 MS/s) at .75 and .85.
+    Every board records the same 4.096 µs, 1.024 µs before the trigger."""
+    boards = [Board("vx2730", "dig2://192.168.0.72", "VX2730", n_channels=16, record_length=2048, pre_trigger=512),
+              Board("vx2740a", "dig2://192.168.0.75", "VX2740", record_length=512, pre_trigger=128),
+              Board("vx2740b", "dig2://192.168.0.85", "VX2740", record_length=512, pre_trigger=128)]
+    for b in boards:
+        b.channels = channels_for(b.model, n=b.n_channels)
+    cfg = DaqConfig(boards=boards)
+    cfg.trigger.setup = "master"
+    return cfg
 
 
 # ---- from and to JSON ----
@@ -215,8 +236,10 @@ def from_dict(data: dict) -> DaqConfig:
         chans = b.get("channels", [])
         if not isinstance(chans, list):
             raise ConfigError(f"boards[{k}].channels must be a list")
+        if not 0 <= board.n_channels <= 64:
+            raise ConfigError(f"boards[{k}].n_channels must be from 0 to 64")
         board.channels = channels_for(board.model, [_fill(Channel, c, f"boards[{k}].channels[{j}]")
-                                                    for j, c in enumerate(chans)])
+                                                    for j, c in enumerate(chans)], board.n_channels)
         extra = b.get("extra", [])
         if not isinstance(extra, list) or not all(isinstance(x, (list, tuple)) and len(x) == 2 for x in extra):
             raise ConfigError(f"boards[{k}].extra must be a list of [path, value]")
@@ -296,7 +319,16 @@ def event_bytes(board: Board) -> int:
 
 
 def uses_self_trigger(cfg: DaqConfig) -> bool:
-    return cfg.trigger.setup in ("self", "logic_or")
+    """Some board triggers on its own channels."""
+    return cfg.trigger.setup in ("self", "logic_or", "master")
+
+
+def triggers_on_channels(cfg: DaqConfig, k: int | None) -> bool:
+    """The k-th board of the run triggers on its own channels (thresholds, ITLA): all in self and logic_or, only
+    the master in setup master."""
+    if k is None:
+        return False
+    return cfg.trigger.setup in ("self", "logic_or") or (cfg.trigger.setup == "master" and k == 0)
 
 
 # ---- the parameters of one board ----
@@ -364,7 +396,17 @@ def plan(cfg: DaqConfig, k: int, facts: models.Model | None = None) -> list[Sett
     # triggers
     last = k == n - 1
     pass_on = n > 1                         # TRG-OUT -> TRG-IN of the next board, with or without the clock chain
-    if trg.setup == "external":
+    own = triggers_on_channels(cfg, k)
+    if trg.setup == "master":
+        if k == 0:
+            put("/par/AcqTriggerSource", "ITLA", "own channels (ITLA)")
+            put("/par/TrgOutMode", trg.master_out if pass_on else "Disabled",
+                "TRG-OUT sends the master's trigger to the next board" if pass_on else "end of the trigger chain")
+        else:
+            put("/par/AcqTriggerSource", "TrgIn", "the master's trigger on TRG-IN")
+            put("/par/TrgOutMode", "Disabled" if last else "TrgIn",
+                "end of the trigger chain" if last else "TRG-OUT passes TRG-IN to the next board")
+    elif trg.setup == "external":
         put("/par/AcqTriggerSource", "TrgIn", "the external trigger on TRG-IN")
         put("/par/TrgOutMode", "Disabled" if last or not pass_on else "TrgIn",
             "end of the trigger chain" if last or not pass_on else "TRG-OUT passes TRG-IN to the next board")
@@ -388,7 +430,7 @@ def plan(cfg: DaqConfig, k: int, facts: models.Model | None = None) -> list[Sett
         else:
             put("/par/AcqTriggerSource", "SwTrg", "software trigger from the DAQ")
             put("/par/TrgOutMode", "Disabled", "")
-    if uses_self_trigger(cfg):
+    if own:
         put("/par/ITLAMainLogic", trg.logic, "how the channel triggers combine")
         if trg.logic == "Majority":
             put("/par/ITLAMajorityLev", trg.majority, "channels needed")
@@ -408,7 +450,7 @@ def plan(cfg: DaqConfig, k: int, facts: models.Model | None = None) -> list[Sett
     if m.gain:
         for a, z, v in _ranges([c.gain for c in ch]):
             put(_ch(a, z, "ChGain"), v, "gain (dB)")
-    if uses_self_trigger(cfg):
+    if own:
         put(_ch(0, len(ch) - 1, "TriggerThrMode"), "Relative", "thresholds from the baseline")
         for a, z, v in _ranges([(-1 if not c.positive else 1) * c.threshold for c in ch]):
             put(_ch(a, z, "TriggerThr"), v, "threshold (counts from the baseline)")
@@ -476,6 +518,8 @@ def check_config(cfg: DaqConfig, check_paths: bool = True, facts: dict | None = 
         warn("run.write_raw", "the data are not kept: only the live view")
     if trg.setup not in SETUPS:
         err("trigger.setup", f"must be one of {', '.join(SETUPS)}")
+    if trg.master_out not in MASTER_OUTS:
+        err("trigger.master_out", f"must be one of {', '.join(MASTER_OUTS)}")
     if trg.logic not in LOGICS:
         err("trigger.logic", f"must be one of {', '.join(LOGICS)}")
     if trg.io_level not in IO_LEVELS:
@@ -507,6 +551,7 @@ def check_config(cfg: DaqConfig, check_paths: bool = True, facts: dict | None = 
         warn("run.sync", "one board: no chain is needed (it runs on its own)")
     names, uris = set(), set()
     windows = []
+    place = {id(b): k for k, (_, b) in enumerate(active)}
     for i, b in enumerate(cfg.boards):
         w = f"board {b.name or i + 1}"
         if not NAME_RE.match(b.name or ""):
@@ -526,6 +571,10 @@ def check_config(cfg: DaqConfig, check_paths: bool = True, facts: dict | None = 
         fact = (facts or {}).get(b.name)
         if fact and fact.get("model") and models.family(fact["model"]) != m.family:
             err(f"boards[{i}].model", f"the board at {b.uri} said it is a {fact['model']}, not a {b.model}")
+        if fact and fact.get("channels") and fact["channels"] != len(b.channels):
+            err(f"boards[{i}].n_channels", f"the board at {b.uri} said it has {fact['channels']} channels, not "
+                                           f"{len(b.channels)} (Use what the boards said)")
+        own = triggers_on_channels(cfg, place.get(id(b)))
         if not b.enabled:
             continue
         if not 4 <= b.record_length <= MAX_RECORD:
@@ -539,8 +588,10 @@ def check_config(cfg: DaqConfig, check_paths: bool = True, facts: dict | None = 
                 err(f"boards[{i}].decimation", "must be 1, 2, 4, ... 1024")
         elif b.decimation != 1:
             err(f"boards[{i}].decimation", f"a {b.model} has no decimation: use 1")
-        if len(b.channels) != m.channels:
-            err(f"boards[{i}].channels", f"a {b.model} has {m.channels} channels")
+        if not 0 <= b.n_channels <= 64:
+            err(f"boards[{i}].n_channels", "must be from 1 to 64 (0: the model's usual number)")
+        if len(b.channels) != (b.n_channels or m.channels):
+            err(f"boards[{i}].channels", f"{w} has {b.n_channels or m.channels} channels, not {len(b.channels)}")
         en = [c for c in b.channels if c.enabled]
         if not en:
             err(f"boards[{i}].channels", f"{w}: no channel is read out")
@@ -550,12 +601,12 @@ def check_config(cfg: DaqConfig, check_paths: bool = True, facts: dict | None = 
                 err(f"{cw}.dc_offset", "must be from 0 to 100 %")
             if ch.threshold < 0:
                 err(f"{cw}.threshold", "counts from the baseline: use 0 or more; the pulse direction is set apart")
-            elif ch.threshold >= m.adc_max // 2 and uses_self_trigger(cfg) and ch.self_trigger and ch.enabled:
+            elif ch.threshold >= m.adc_max // 2 and own and ch.self_trigger and ch.enabled:
                 warn(f"{cw}.threshold", f"{ch.threshold} counts from the baseline is more than half the ADC range "
                                         f"(0-{m.adc_max}): is it meant as an ADC level?")
             if ch.gain and not m.gain:
                 err(f"{cw}.gain", f"a {b.model} has no variable gain: use 0")
-        if uses_self_trigger(cfg):
+        if own:
             trig = [c for c in b.channels if c.enabled and c.self_trigger]
             if not trig:
                 err(f"boards[{i}].channels", f"{w}: no channel takes part in the board's trigger")
@@ -569,7 +620,7 @@ def check_config(cfg: DaqConfig, check_paths: bool = True, facts: dict | None = 
             if not v:
                 err(f"boards[{i}].extra[{j}]", "no value")
         windows.append((b.name, b.record_length * sample_ns(b, m), b.pre_trigger * sample_ns(b, m)))
-    common = trg.setup in ("external", "logic_or") or (trg.setup == "periodic" and trg.software_target == "chain")
+    common = trg.setup in ("master", "external", "logic_or") or (trg.setup == "periodic" and trg.software_target == "chain")
     if len(windows) > 1 and common:
         lengths = {round(x[1]) for x in windows}
         pres = {round(x[2]) for x in windows}

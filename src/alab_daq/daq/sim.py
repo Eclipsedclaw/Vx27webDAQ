@@ -22,6 +22,7 @@ nostop:NAME, unarmed:NAME (the board does not take the arm command).
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import math
 import shlex
 import threading
@@ -175,10 +176,12 @@ def parse_options(text: str) -> argparse.Namespace:
 class Crate:
     """The simulated boards of one run, and what they share."""
 
-    def __init__(self, options: str = "", cabling: str = "chain", models_by_name: dict | None = None):
+    def __init__(self, options: str = "", cabling: str = "chain", models_by_name: dict | None = None,
+                 channels_by_name: dict | None = None):
         self.opt = parse_options(options)
         self.cabling = cabling                  # "chain", "or_unit" or "none"
         self.models = models_by_name or {}      # board name -> model name (from the configuration)
+        self.channels = channels_by_name or {}  # board name -> its number of inputs (0: the model's usual)
         self.boards: list[SimBoard] = []
         self.lock = threading.RLock()
         self.epoch = time.monotonic()
@@ -199,7 +202,7 @@ class Crate:
     def open(self, uri: str, name: str = "") -> "SimBoard":
         if self.failing("open", name):
             raise BoardError(f"cannot connect to {uri}: no reply (simulated)")
-        b = SimBoard(self, uri, name, self.models.get(name, "V2740"), len(self.boards))
+        b = SimBoard(self, uri, name, self.models.get(name, "V2740"), len(self.boards), self.channels.get(name, 0))
         self.boards.append(b)
         return b
 
@@ -267,13 +270,17 @@ class Crate:
             return b.itla(t0, t1)
         if mode == "TestPulse":
             return [(t, None) for t in b.test_pulses(t0, t1)]
+        if mode == "AcceptTrg":                 # the triggers the board took
+            return b.triggers(t0, t1, seen)
         return []
 
 
 class SimBoard:
-    def __init__(self, crate: Crate, uri: str, name: str, model_name: str, index: int):
+    def __init__(self, crate: Crate, uri: str, name: str, model_name: str, index: int, n_channels: int = 0):
         self.crate, self.uri, self.name, self.index = crate, uri, name, index
         self.m = models.model(model_name) or models.MODELS["2740"]
+        if n_channels and n_channels != self.m.channels:     # a smaller variant (e.g. a 16-input VX2730)
+            self.m = dataclasses.replace(self.m, channels=n_channels)
         self.model_name = model_name if models.model(model_name) else "V2740"
         self.serial = str(10000 + zlib.crc32(f"{name}{uri}".encode()) % 50000)
         self.bp, self.cp = board_params(self.m), channel_params(self.m)
@@ -467,7 +474,7 @@ class SimBoard:
                 out.append((t, seed))
         return out
 
-    def triggers(self, t0: float, t1: float) -> list[tuple[float, int | None]]:
+    def triggers(self, t0: float, t1: float, seen=None) -> list[tuple[float, int | None]]:
         sources = self.p("acqtriggersource").split("|")
         out: list[tuple[float, int | None]] = []
         if "SwTrg" in sources:
@@ -477,7 +484,7 @@ class SimBoard:
         if "ITLA" in sources:
             out += self.itla(t0, t1)
         if "TrgIn" in sources:
-            out += self.crate.trgin(self, t0, t1)
+            out += self.crate.trgin(self, t0, t1, seen)
         out.sort(key=lambda x: x[0])
         merged = []                         # one trigger for the same moment from two sources
         for t, s in out:
