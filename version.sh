@@ -12,8 +12,8 @@
 # A step takes the notes written under "## Unreleased" in CHANGELOG.md, plus each -m NOTE as a line
 # "- NOTE", and puts them under a new heading "## vX.Y.Z (date)". It writes the new number into
 # __init__.py, commits every change in this folder as "vX.Y.Z: <first note>", and tags that commit vX.Y.Z.
-# MINOR sets PATCH back to 0; MAJOR sets MINOR and PATCH back to 0. Nothing leaves this computer: the
-# repository has no remote. Options after -- go to git commit (for example --trailer "...").
+# MINOR sets PATCH back to 0; MAJOR sets MINOR and PATCH back to 0. Nothing leaves this computer: it never
+# pushes (git push origin main --tags does, when you choose). Options after -- go to git commit (e.g. --trailer "...").
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 init=src/alab_daq/__init__.py

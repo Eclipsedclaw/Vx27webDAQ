@@ -5,6 +5,10 @@ What changed in each version of ALAB DAQ. Write the notes of the next version un
 
 ## Unreleased
 
+## v0.0.2 (2026-11-07)
+
+- Ubuntu and GitHub: only code goes into git: .gitignore keeps out every data file wherever it lands (`*.raw`, `*.root`, `*.evt`, `*.log`, `data/`, `runs/`, run records, configurations saved into this folder), and a test fails if git tracks anything but code, scripts and their documents, or a file over 200 kB. setup.sh checks for Python 3.11 or newer and its venv module (Ubuntu: python3-venv) and takes `PYTHON=...`; caen_libs.sh names the Ubuntu packages; the README installs on Ubuntu from the GitHub repository (PyPI has every pinned version for Python 3.11-3.13).
+
 ## v0.0.1 (2026-11-07)
 
 - Build check: build.sh's check of the build quoted its test of the caen_felib package wrongly (a Python syntax error inside the shell's quotes), so every build stopped; it now checks the package without loading the CAEN library. Found by a test build into JC/tmp (all 37 tests pass on the read-only build).

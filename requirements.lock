@@ -1,4 +1,5 @@
-# The exact Python packages ALAB DAQ is tested with (on dbar's Python 3.11, 2026-11-07).
+# The exact Python packages ALAB DAQ is tested with (Python 3.11, 2026-11-07; PyPI has these versions
+# for Python 3.11, 3.12 and 3.13, e.g. Ubuntu 24.04's 3.12).
 # setup.sh downloads these files from https://pypi.org into wheels/; build.sh installs only these files.
 # Change a version only after ./run_tests.sh passes with it.
 numpy==2.4.6

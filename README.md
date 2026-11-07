@@ -1,6 +1,6 @@
 # ALAB DAQ
 
-A web page for multi-board data taking with CAEN Digitizer 2.0 boards — **V2740** (64 channels, 16 bit, 125 MS/s), **V2730** (32 channels, 14 bit, 500 MS/s), also V2745 — running the **Scope firmware** (the firmware CAEN's WaveDump2 uses). It configures the boards, runs them synchronized on one clock (a CLK-OUT → CLK-IN chain), shows the run live (every board's state and rates, the waveforms of any board and channel), keeps every board's data losslessly, and converts them to ROOT. One server runs on the DAQ computer for the whole lab, and everyone opens it in their own browser. It is built on the design of [XIAOLAB DAQ](../XIAOLAB_DAQ_GUI) (the same pages, accounts and safety), with its own DAQ program in place of testDAQ.
+A web page for multi-board data taking with CAEN Digitizer 2.0 boards — **V2740** (64 channels, 16 bit, 125 MS/s), **V2730** (32 channels, 14 bit, 500 MS/s), also V2745 — running the **Scope firmware** (the firmware CAEN's WaveDump2 uses). It configures the boards, runs them synchronized on one clock (a CLK-OUT → CLK-IN chain), shows the run live (every board's state and rates, the waveforms of any board and channel), keeps every board's data losslessly, and converts them to ROOT. One server runs on the DAQ computer for the whole lab, and everyone opens it in their own browser. It is built on the design of XIAOLAB DAQ, the lab's page for its AD9694 readout (the same pages, accounts and safety), with its own DAQ program in place of testDAQ.
 
 **State (v0.0.0, 2026-11-07):** complete and tested with simulated boards; **not yet tried on real boards** (none was reachable from dbar, where it was built). See [What is verified](#what-is-verified-and-what-is-not).
 
@@ -88,7 +88,13 @@ Verified here, with the simulated boards (`./run_tests.sh`, 37 tests; and in hea
 
 ## Install and update (on the DAQ computer)
 
-Needs Linux with Python 3.11 (the versions in `requirements.lock` are for 3.11), git, a C/C++17 compiler, make and the Boost headers (for the CAEN libraries), and systemd for the service.
+The DAQ computer is an Ubuntu computer: Ubuntu 24.04 LTS or newer (Python 3.12 or 3.13; PyPI has the pinned versions of `requirements.lock` for Python 3.11–3.13). Ubuntu 22.04 has Python 3.10, too old: install `python3.11` and `python3.11-venv` (deadsnakes PPA) and run `PYTHON=python3.11 ./setup.sh`, `sudo PYTHON=/usr/bin/python3.11 ./build.sh`. Once, what the scripts need:
+
+```bash
+sudo apt install git python3-venv build-essential libboost-dev
+git clone git@github.com:OWNER/ALAB_DAQ.git      # the GitHub repository of this folder
+cd ALAB_DAQ
+```
 
 1. Once, as your normal user (no sudo), set up this folder: the exact packages of `requirements.lock` from PyPI into `wheels/`, and the Python environment `ALAB_ENV/`:
 
@@ -110,7 +116,7 @@ Needs Linux with Python 3.11 (the versions in `requirements.lock` are for 3.11),
    sudo ./build.sh --service-user ACCOUNT --admin NAME
    ```
 
-4. Every update: `sudo ./build.sh` (a run that is going goes on). Check a build with `./run_tests.sh --build /opt/ALAB_DAQ_WEB`; `BUILD_INFO` says its version, git commit and CAEN libraries.
+4. Every update: `git pull`, then `sudo ./build.sh` (a run that is going goes on; `./setup.sh` first when `requirements.lock` changed). Check a build with `./run_tests.sh --build /opt/ALAB_DAQ_WEB`; `BUILD_INFO` says its version, git commit and CAEN libraries.
 
 5. Accounts from the command line, as the service account: `sudo -u ACCOUNT alab-daq-web user add alice --role operator` (also `user list`, `user password NAME`, `user role NAME ROLE`, `user remove NAME`).
 
@@ -120,9 +126,11 @@ To try the page from this folder without the service, as yourself: `./run_web.sh
 
 **The first run with real boards:** set each board's address (`dig2://IP` or `dig2://usb:PID`) and model, cable the chain, press **Check boards** (every row green with the right model and serial), start a short run with the *periodic* trigger, and read *What this board gets* and the DAQ output if a board refuses something.
 
-## Versions
+## Versions and git
 
-vMAJOR.MINOR.PATCH (on the page, top left; in `alab-daq-web --version`, `BUILD_INFO`, every `run.json` and every data file's header). Every change adds 1 to PATCH; MINOR and MAJOR change only when you choose so. Each version is one commit with the tag `vX.Y.Z` in the local git repository of this folder (it has no remote; nothing is pushed), and [CHANGELOG.md](CHANGELOG.md) says what changed. `./version.sh` shows the version; `./version.sh minor -m "..."`, `./version.sh major -m "..."`, `./version.sh commit` (after changing the number in `src/alab_daq/__init__.py` by hand).
+vMAJOR.MINOR.PATCH (on the page, top left; in `alab-daq-web --version`, `BUILD_INFO`, every `run.json` and every data file's header). Every change adds 1 to PATCH; MINOR and MAJOR change only when you choose so. Each version is one commit with the tag `vX.Y.Z`, and [CHANGELOG.md](CHANGELOG.md) says what changed. `version.sh` never pushes: `git push origin main --tags` sends the commits and tags to GitHub when you choose. `./version.sh` shows the version; `./version.sh minor -m "..."`, `./version.sh major -m "..."`, `./version.sh commit` (after changing the number in `src/alab_daq/__init__.py` by hand).
+
+**Only the code, the scripts and their documents are in git**, never data: `.gitignore` keeps out the Python environment, the downloaded packages, the CAEN libraries, the test files, and every data file wherever it lands (`*.raw`, `*.root`, `*.evt`, `*.log`, `data/`, `runs/`, run records, configurations saved into this folder), and `./run_tests.sh` fails if git tracks anything else or a file over 200 kB. `git status --short --ignored` shows what is kept out.
 
 ## Safety
 

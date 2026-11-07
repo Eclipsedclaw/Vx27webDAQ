@@ -38,11 +38,11 @@ case "$jobs" in ''|*[!0-9]*) fail "--jobs needs a number" ;; esac
 cores="$(lscpu -p=Core,Socket 2>/dev/null | grep -v '^#' | sort -u | wc -l)"
 limit=$(( cores * 9 / 10 )); [ "$limit" -ge 1 ] || limit=1
 [ "$jobs" -le "$limit" ] || jobs="$limit"
-for tool in git make gcc g++; do command -v "$tool" >/dev/null || fail "$tool is missing"; done
+for tool in git make gcc g++; do command -v "$tool" >/dev/null || fail "$tool is missing (Ubuntu: sudo apt install git build-essential)"; done
 if [ -n "$boost" ]; then
     [ -f "$boost/boost/version.hpp" ] || fail "$boost has no boost/version.hpp"
 elif ! echo '#include <boost/version.hpp>' | g++ -x c++ -E - >/dev/null 2>&1; then
-    fail "the Boost headers are missing: install libboost-dev (or boost-devel), or give --with-boost DIR"
+    fail "the Boost headers are missing: Ubuntu: sudo apt install libboost-dev (RHEL: boost-devel), or give --with-boost DIR"
 fi
 
 fetch() {           # fetch NAME REPO COMMIT: caen/src/NAME at that commit

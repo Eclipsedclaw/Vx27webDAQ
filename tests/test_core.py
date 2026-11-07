@@ -422,5 +422,39 @@ class RootTests(unittest.TestCase):
         self.assertTrue(same, why)
 
 
+
+class RepositoryTests(unittest.TestCase):
+    """Only the code, the scripts and their documents go into git (and to GitHub): no data, ever."""
+
+    ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    SUFFIXES = (".py", ".js", ".css", ".html", ".svg", ".sh", ".md", ".toml", ".lock", ".txt")
+    OTHERS = {".gitignore", "src/alab_daq/web/static/i18n/zh.json", "src/alab_daq/web/static/vendor/uplot/LICENSE"}
+
+    def git(self, *args, stdin=None):
+        return subprocess.run(["git", "-C", self.ROOT, "--no-optional-locks", *args], input=stdin,
+                              capture_output=True, text=True)
+
+    def setUp(self):
+        if self.git("rev-parse", "--is-inside-work-tree").stdout.strip() != "true":
+            self.skipTest("not a git repository")
+
+    def test_only_code_is_tracked(self):
+        files = self.git("ls-files").stdout.split()
+        self.assertGreater(len(files), 30)
+        self.assertEqual([f for f in files if not f.endswith(self.SUFFIXES) and f not in self.OTHERS], [])
+        self.assertEqual([f for f in files if os.path.getsize(os.path.join(self.ROOT, f)) > 200_000], [])
+
+    def test_data_are_ignored(self):
+        data = ["run00001_b0.raw", "elsewhere/run00001_b0_001.raw", "x/run00001_b0.root", "a.root.part", "live/b0.evt",
+                "data/run00001_b0.json", "runs/20261107_141418/config.json", "my_config.json", "ALAB_DAQ_data/a.json",
+                "ALAB_DAQ_runs/b/run.json", "status.json", "daq.log", "x.wbin", "caen/lib/libCAEN_Dig2.so",
+                "wheels/numpy.whl", "ALAB_ENV/bin/python", ".test_tmp/core/a.raw", "src/alab_daq/__pycache__/a.pyc"]
+        out = self.git("check-ignore", "--no-index", "--stdin", stdin="\n".join(data)).stdout.split()
+        self.assertEqual(sorted(set(data) - set(out)), [])
+        code = ["src/alab_daq/web/static/i18n/zh.json", "src/alab_daq/core/rawdata.py", "tests/test_core.py", "setup.sh",
+                "README.md", "src/alab_daq/web/static/vendor/uplot/uPlot.iife.min.js"]
+        self.assertEqual(self.git("check-ignore", "--no-index", "--stdin", stdin="\n".join(code)).stdout.split(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

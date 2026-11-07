@@ -1,3 +1,5 @@
+# Only the code, the scripts and their documents belong in git; no data, ever (tests/test_core.py checks it).
+
 # made by setup.sh
 /ALAB_ENV/
 /wheels/
@@ -11,3 +13,26 @@
 # Python bytecode caches, anywhere
 __pycache__/
 *.py[cod]
+
+# data, wherever they land (a data or save folder set inside this folder, copies, conversions)
+*.raw
+*.root
+*.root.part
+*.evt
+*.wbin
+*.dat
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.log
+/data/
+/runs/
+ALAB_DAQ_data/
+ALAB_DAQ_runs/
+# run records and configurations saved here by hand (the page saves .json files)
+run.json
+status.json
+daq.pid
+daq.exit
+/*.json
