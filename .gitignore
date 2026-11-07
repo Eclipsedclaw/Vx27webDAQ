@@ -1,0 +1,13 @@
+# made by setup.sh
+/ALAB_ENV/
+/wheels/
+
+# made by caen_libs.sh (CAEN FELib and CAEN Dig2: sources and the built libraries)
+/caen/
+
+# made by the tests
+/.test_tmp/
+
+# Python bytecode caches, anywhere
+__pycache__/
+*.py[cod]

@@ -1,0 +1,4 @@
+uPlot 1.6.32 (MIT license, see LICENSE), from the npm registry:
+https://registry.npmjs.org/uplot/-/uplot-1.6.32.tgz
+integrity sha512-KIMVnG68zvu5XXUbC4LQEPnhwOxBuLyW1AHtpm6IKTXImkbLgkMy+jabjLgSLMasNuGGzQm/ep3tOkyTxpiQIw== (checked when downloaded, 2026-11-06)
+Files: dist/uPlot.iife.min.js, dist/uPlot.min.css, LICENSE of the package.

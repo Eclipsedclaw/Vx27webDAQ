@@ -1,0 +1,27 @@
+# The exact Python packages ALAB DAQ is tested with (on dbar's Python 3.11, 2026-11-07).
+# setup.sh downloads these files from https://pypi.org into wheels/; build.sh installs only these files.
+# Change a version only after ./run_tests.sh passes with it.
+numpy==2.4.6
+# CAEN's official Python binding of CAEN FELib (it loads libCAEN_FELib.so: see caen_libs.sh)
+caen-felib==1.4.0
+# reading and writing ROOT files without ROOT: uproot and what it needs
+uproot==5.7.7
+awkward==2.14.0
+awkward-cpp==57
+cramjam==2.14.0
+xxhash==4.0.2
+fsspec==2026.9.0
+packaging==26.3
+importlib-metadata==10.1.0
+zipp==4.1.2
+# the web server: aiohttp and what it needs
+aiohttp==3.14.5
+aiohappyeyeballs==2.7.1
+aiosignal==1.4.0
+attrs==26.1.0
+frozenlist==1.8.0
+multidict==7.2.1
+propcache==0.5.4
+typing-extensions==4.16.0
+yarl==1.25.1
+idna==3.20
