@@ -162,8 +162,8 @@ version="$(cd "$dest" && env -i PATH=/usr/bin:/bin PYTHONPATH="$dest/src" "$py" 
 import sys
 import alab_daq
 import uproot, aiohttp, importlib.util
-if importlib.util.find_spec('caen_felib') is None:
-    sys.exit('the package caen_felib is missing')
+if importlib.util.find_spec("caen_felib") is None:
+    sys.exit("the package caen_felib is missing")
 from alab_daq.web.server import STATIC, create_app
 if not alab_daq.__file__.startswith(sys.argv[1] + "/"):
     sys.exit("the code was loaded from " + alab_daq.__file__)

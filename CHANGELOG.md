@@ -5,6 +5,10 @@ What changed in each version of ALAB DAQ. Write the notes of the next version un
 
 ## Unreleased
 
+## v0.0.1 (2026-11-07)
+
+- Build check: build.sh's check of the build quoted its test of the caen_felib package wrongly (a Python syntax error inside the shell's quotes), so every build stopped; it now checks the package without loading the CAEN library. Found by a test build into JC/tmp (all 37 tests pass on the read-only build).
+
 ## v0.0.0 (2026-11-07)
 
 - First version: a web page for multi-board runs of CAEN Digitizer 2.0 boards (V2740, V2730, V2745) with the Scope firmware, built on the design of XIAOLAB DAQ v1.0.12.
