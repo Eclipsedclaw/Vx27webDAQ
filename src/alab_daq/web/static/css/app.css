@@ -631,3 +631,13 @@ details.explain p { margin: 6px 0 0; font-size: 12.5px; color: var(--text-2); li
 .sv-led-stopped { fill: var(--muted); }
 .input.input-sm { height: 26px; padding: 0 6px; font-size: 12px; }
 .ch-range .input.num { height: 26px; font-size: 12px; }
+
+/* ---- a board's own trigger: the mask (channel buttons) and every channel's threshold ---- */
+.cfg-trig-body { gap: 8px; padding: 6px 0 4px; }
+.cfg-trig .chan-grid { grid-template-columns: repeat(var(--cols, 16), minmax(30px, 1fr)); }
+@media (max-width: 700px) { .cfg-trig .chan-grid { grid-template-columns: repeat(8, minmax(30px, 1fr)); } }
+.thr-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 6px 10px; }
+.thr-cell { display: flex; align-items: center; gap: 6px; }
+.thr-cell .small { min-width: 32px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.thr-cell .input.num { width: 70px; height: 28px; }
+.cfg-trig-note { display: flex; align-items: center; gap: 6px; border-top: 1px solid var(--border); padding-top: 6px; }

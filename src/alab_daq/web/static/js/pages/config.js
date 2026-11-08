@@ -296,7 +296,82 @@ export function configPage(root, app) {
         ...field(t("clock-out delay"), [optional(() => b.clock_out_delay_ps, (v) => { b.clock_out_delay_ps = v; }, `boards[${i}].clock_out_delay_ps`, plan ? String(plan.clock_out_delay_ps) : "0", { float: true }), h("span.text2", "ps")],
                  t("empty: CAEN's value (−2148 ps on the master, −3111 ps in the middle, 0 at the end); steps of 74 ps; depends on the cables"))));
     delays.open = store(`config.delays.${i}`) === "1";
-    return h("div.cfg-board", { dataset: { board: String(i) } }, head, grid, delays, ioEditor(b, i, info), channelEditor(b, i, info), extraEditor(b, i), planBox(b, i));
+    return h("div.cfg-board", { dataset: { board: String(i) } }, head, grid, delays, triggerEditor(b, i, info), ioEditor(b, i, info),
+             channelEditor(b, i, info), extraEditor(b, i), planBox(b, i));
+  }
+
+  // the board's own trigger, as WaveDump2 shows it: the mask (the channels that make the board trigger: click them
+  // in or out) and every channel's threshold. Only on a board that triggers on its own channels; the Channels
+  // table below edits the same values, and each keeps the other in step (data-thr, data-mask)
+  function syncInputs(key, value, skip) {
+    form.querySelectorAll(`[data-thr="${key}"]`).forEach((el) => { if (el !== skip) el.value = String(value); });
+  }
+
+  function syncMask(i, c, on) {
+    form.querySelectorAll(`[data-mask="${i}:${c}"]`).forEach((el) => {
+      if (el.type === "checkbox") el.checked = on;
+      else { el.classList.toggle("on", on); el.setAttribute("aria-pressed", on ? "true" : "false"); }
+    });
+    const sum = form.querySelector(`[data-trig-summary="${i}"]`);
+    if (sum) setText(sum, trigSummary(model.boards[i]));
+  }
+
+  function trigSummary(b) {
+    const mask = b.channels.filter((x) => x.self_trigger && x.enabled);
+    const thr = mask.map((x) => x.threshold);
+    const range = !thr.length ? t("no channel in the mask") : Math.min(...thr) === Math.max(...thr)
+      ? t("threshold {t} counts", { t: thr[0] }) : t("thresholds {a} to {b} counts", { a: Math.min(...thr), b: Math.max(...thr) });
+    return t("{k} of {n} channels in the mask", { k: mask.length, n: b.channels.length }) + ` · ${range}`;
+  }
+
+  function triggerEditor(b, i, info) {
+    if (!info.self_trigger) {
+      return h("div.cfg-trig-note.hint", icon("info"),
+               t("Trigger: this board takes its trigger on TRG-IN, so its channels get no mask and no thresholds"));
+    }
+    const ch = b.channels;
+    const box = h("details.cfg-trig", { ontoggle: () => store(`config.trig.${i}`, box.open ? null : "0") },
+      h("summary", icon("zoom"), t("Trigger"), h("span.hint", { dataset: { trigSummary: String(i) } }, trigSummary(b))));
+    box.open = store(`config.trig.${i}`) !== "0";
+    const all = (fn) => { ch.forEach((x, c) => fn(x, c)); edited(true); };
+    const btn = (text, title, fn) => h("button.btn.btn-sm", { type: "button", disabled: !can, title, onclick: () => all(fn) }, text);
+    const maskGrid = h("div.chan-grid", { role: "group", "aria-label": t("Trigger mask") }, ch.map((x, c) => {
+      const b2 = h("button.chan", { type: "button", disabled: !can, "aria-pressed": x.self_trigger ? "true" : "false",
+                                    dataset: { mask: `${i}:${c}` },
+                                    title: !x.enabled ? t("ch{c}: not read out, so it does not trigger", { c })
+                                                      : t("ch{c}: click to put it in the board trigger or take it out", { c }),
+                                    onclick: () => { x.self_trigger = !x.self_trigger; edited(); syncMask(i, c, x.self_trigger); } }, String(c));
+      if (x.self_trigger) b2.classList.add("on");
+      if (!x.enabled) b2.classList.add("dim");
+      return b2;
+    }));
+    maskGrid.style.setProperty("--cols", Math.min(16, ch.length));
+    const same = h("input.input.num", { type: "number", min: "0", max: "65535", disabled: !can, style: "width:90px",
+                                        value: String((ch.find((x) => x.self_trigger) || ch[0] || {}).threshold ?? 100), "aria-label": t("same threshold for all") });
+    const thrGrid = h("div.thr-grid", ch.map((x, c) => {
+      const el = h("input.input.num", { type: "number", min: "0", max: "65535", value: String(x.threshold), disabled: !can,
+                                        "aria-label": t("threshold of ch{c}", { c }), dataset: { thr: `${i}:${c}` },
+                                        oninput: () => { const v = Math.round(Number(el.value)); if (el.value !== "" && Number.isFinite(v) && v >= 0) {
+                                          x.threshold = v; edited(); syncInputs(`${i}:${c}`, v, el);
+                                          const sum = form.querySelector(`[data-trig-summary="${i}"]`); if (sum) setText(sum, trigSummary(b)); } } });
+      return h("label.thr-cell", h("span.small", `ch${c}`), el);
+    }));
+    box.append(h("div.stack.cfg-trig-body",
+      h("div.row.wrap", h("b.small", t("Mask")),
+        h("span.hint", t("the channels whose pulses make the board trigger, with the channel logic of the Trigger section")), h("span.spacer"),
+        btn(t("Select all"), t("Every channel in the board trigger"), (x) => { x.self_trigger = true; }),
+        btn(t("None"), t("No channel in the board trigger"), (x) => { x.self_trigger = false; }),
+        btn(t("Read out only"), t("The channels that are read out"), (x) => { x.self_trigger = x.enabled; })),
+      maskGrid,
+      h("div.row.wrap", h("b.small", t("Thresholds")),
+        h("span.hint", t("ADC counts from each channel's baseline, in the direction of its pulses (Channels: positive)")), h("span.spacer"),
+        h("span.label", t("same for all")), same,
+        h("button.btn.btn-sm", { type: "button", disabled: !can, onclick: () => {
+          const v = Math.round(Number(same.value));
+          if (Number.isFinite(v) && v >= 0) all((x) => { x.threshold = v; });
+        } }, t("Set"))),
+      thrGrid));
+    return box;
   }
 
   // the front panel of a board (WaveDump2's Board settings, Advanced): each signal as the trigger setup needs it,
@@ -330,6 +405,16 @@ export function configPage(root, app) {
                t("the analog test output (where the board has one): e.g. pulses into a channel of every board to see that they line up (the combined view, lined up by timestamps). If a board does not know the value it warns and runs without it")));
     box.appendChild(grid);
     return box;
+  }
+
+  function syncedThreshold(el, i, k, b) {          // a threshold of the Channels table: the Trigger panel follows it
+    el.dataset.thr = `${i}:${k}`;
+    el.addEventListener("input", () => {
+      syncInputs(`${i}:${k}`, b.channels[k].threshold, el);
+      const sum = form.querySelector(`[data-trig-summary="${i}"]`);
+      if (sum) setText(sum, trigSummary(b));
+    });
+    return el;
   }
 
   function channelEditor(b, i, info) {
@@ -369,12 +454,13 @@ export function configPage(root, app) {
       const w = `boards[${i}].channels[${k}]`;
       const cb = (key, label) => {
         const el = h("input", { type: "checkbox", checked: Boolean(ch[key]), disabled: !can, "aria-label": `${label} ch${k}`,
-                                onchange: () => { ch[key] = el.checked; edited(); } });
+                                dataset: key === "self_trigger" ? { mask: `${i}:${k}` } : undefined,
+                                onchange: () => { ch[key] = el.checked; edited(); if (key === "self_trigger") syncMask(i, k, el.checked); } });
         return h("td", el);
       };
       return h("tr", h("th.rowh", String(k)), cb("enabled", t("read out")),
                h("td", number(() => ch.dc_offset, (v) => { ch.dc_offset = v; }, `${w}.dc_offset`, { lo: 0, hi: 100, step: 0.1, float: true, width: "80px" })),
-               h("td", number(() => ch.threshold, (v) => { ch.threshold = v; }, `${w}.threshold`, { lo: 0, hi: 65535, width: "90px" })),
+               h("td", syncedThreshold(number(() => ch.threshold, (v) => { ch.threshold = v; }, `${w}.threshold`, { lo: 0, hi: 65535, width: "90px" }), i, k, b)),
                cb("positive", t("positive")), self ? cb("self_trigger", t("in trigger")) : null,
                self && groups ? h("td", select([["A", "A"], ["B", "B"]], () => ch.itl || "A", (v) => { ch.itl = v; }, `${w}.itl`, false)) : null,
                info.gain ? h("td", number(() => ch.gain, (v) => { ch.gain = v; }, `${w}.gain`, { lo: 0, hi: 40, step: 0.5, float: true, width: "80px" })) : null);
