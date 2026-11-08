@@ -8,13 +8,16 @@
 // give each sample's time from the trigger too (the board's own sample time: 2 ns on a V2730, 8 ns on a V2740).
 import { get, post } from "./api.js";
 import { T, t } from "./i18n.js";
-import { ADC_MAX, SAMPLE_NS, WavePlot, fmtTime } from "./plots.js";
+import { ADC_MAX, SAMPLE_NS, WavePlot, XYPlot, fmtTime } from "./plots.js";
+import { Ring, SampleHistogram, powerSpectrum, spectrumDb } from "./dsp.js";
 import { basename, chip, chooseFile, clear, fail, fmtInt, fmtNum, h, icon, segmented, setText, splitter, store, toast } from "./ui.js";
 import { MAX_SHOWN, channelPicker, defaultChannels, rangesText } from "./chanpick.js";
 import { combinedView } from "./combined.js";
 
 const RANGES = [["auto", T("Auto")], ["full", T("Full scale")], ["custom", T("Custom")], ["baseline", T("Baseline ± N")]];
 const MAX_CARDS = 16;
+const PLOTS = [["wave", T("Waveforms")], ["fft", T("FFT")], ["hist", T("Histogram")]];
+const AVERAGES = [1, 4, 16, 64];
 
 // a timestamp (8 ns ticks since the start of the run): "1.234 µs" when small, "12.461359872 s" when large
 function fmtStamp(ticks) {
@@ -40,6 +43,12 @@ export function wavePanel(app, { onBoard } = {}) {
   let mouse = store("wave.mouse") === "measure" ? "measure" : "zoom";
   let viewMode = store("wave.view") === "combined" ? "combined" : "channels";
   let sel = [];                   // the channels shown, of the board shown
+  // the scope tools (WaveDump2's plot types): waveforms (each event, or the mean of the newest N), FFT (the mean
+  // power of the newest N), the samples histogram (every event so far); the y axis in ADC or mV from the baseline
+  let plotMode = PLOTS.some(([k]) => k === store("wave.plot")) ? store("wave.plot") : "wave";
+  let avgN = AVERAGES.includes(Number(store("wave.avg"))) ? Number(store("wave.avg")) : 1;
+  let yUnit = store("wave.unit") === "mv" ? "mv" : "adc";
+  let mvPerAdc = 2000 / 65536, lastKey = null, seen = 0;
   let span = null;
   let nChannels = 64, t0 = null, eventFacts = null;
   const sourceSeg = segmented([["live", t("Live")], ["file", t("File")]], source, (v) => setSource(v), { label: t("Source") });
@@ -102,11 +111,24 @@ export function wavePanel(app, { onBoard } = {}) {
     h("label.row.nowrap", { title: t("Also into the configuration being edited, so the next runs use it") }, tuneKeep, t("keep for the next runs")), tuneMsg));
   const boardGroup = h("div.group", h("span.label", t("Board")), boardSel);
   const chanGroup = h("div.group", h("span.label", t("Channels")), pickBtn);
+  const plotSeg = segmented(PLOTS.map(([k, v]) => [k, t(v)]), plotMode, (v) => setPlot(v), { label: t("Plot") });
+  plotSeg.title = t("Waveforms; FFT: the spectrum of each waveform (its mean taken off, a Hann window) in dB of full scale; Histogram: how often each ADC value came, over the events so far");
+  const avgSel = h("select.input", { "aria-label": t("Average"), title: t("Waveforms and FFT: each event, or the mean of the newest N events"),
+                                    onchange: () => { avgN = Number(avgSel.value); store("wave.avg", avgN); restart(); } },
+                   AVERAGES.map((n) => h("option", { value: String(n) }, n === 1 ? t("each event") : t("mean of {n}", { n }))));
+  avgSel.value = String(avgN);
+  const unitSeg = segmented([["adc", "ADC"], ["mv", "mV"]], yUnit, (v) => setUnit(v), { label: t("Y axis") });
+  unitSeg.title = t("ADC counts, or mV from each channel's baseline (its board's 2 Vpp input range: 0.122 mV a count on a VX2730, 0.031 mV on a VX2740)");
+  const restartBtn = h("button.btn.btn-sm", { type: "button", onclick: () => restart(), title: t("Start the means and the histograms again") },
+                      icon("refresh"), t("Restart"));
+  const avgGroup = h("div.group", avgSel);
+  const unitGroup = h("div.group", h("span.label", t("Y axis")), unitSeg);
+  const rangeGroup = h("div.group", h("span.label", t("ADC range")), rangeSeg, customBox, halfBox);
+  const linesGroup = h("div.group", h("span.label", t("Lines")), trigLineBtn, thrLineBtn);
+  const mouseGroup = h("div.group", h("span.label", t("Mouse")), mouseSeg);
   const howRow = h("div.toolbar-row",
-      h("div.group", h("span.label", t("ADC range")), rangeSeg, customBox, halfBox),
-      h("div.group", h("span.label", t("Lines")), trigLineBtn, thrLineBtn),
-      h("div.group", h("span.label", t("Mouse")), mouseSeg),
-      h("span.spacer"), app.can("control") ? tuneBtn : null, resetBtn);
+      h("div.group", h("span.label", t("Plot")), plotSeg), avgGroup, unitGroup, rangeGroup, linesGroup, mouseGroup,
+      h("span.spacer"), app.can("control") ? tuneBtn : null, restartBtn, resetBtn);
   panel.appendChild(h("div.toolbar.two-rows",
     h("div.toolbar-row",
       h("h2.card-title", t("Waveforms")), viewSeg,
@@ -136,6 +158,7 @@ export function wavePanel(app, { onBoard } = {}) {
                      h("th.n", { title: t("Standard deviation of the samples in the range (ADC)") }, "σ"),
                      h("th.n", { title: t("The sample farthest from the baseline (the mean of the first 16 samples), minus the baseline (ADC)") }, t("peak")),
                      h("th.n", { title: t("Where the peak is: the sample, and its time from the trigger") }, t("at")),
+                     h("th.n", { title: t("The samples at the two edges of the range, and their difference (like two cursors)") }, t("edges (Δ)")),
                      h("th.n", { title: t("Sum of (sample − baseline) over the range, times the sample time (ADC·ns)") }, t("area (ADC·ns)")))),
         measureRows)));
   const body = splitter(wrap, measureBox, { key: "wave.measure", vertical: true, initial: 0.64, min: 110 });
@@ -149,18 +172,20 @@ export function wavePanel(app, { onBoard } = {}) {
     const expand = h("button.btn.btn-ghost.btn-sm.btn-icon", { type: "button", "aria-label": t("This channel alone"),
                                                                title: t("This channel alone, or all channels again"),
                                                                onclick: () => enlarge(enlarged === k ? null : k) }, icon("expand"));
-    const plotEl = h("div.plot"), empty = h("div.wave-empty.hidden");
-    const card = h("div.wave", h("div.wave-head", title, meta, warn, read, expand), h("div.wave-plot", plotEl, empty));
+    const plotEl = h("div.plot"), xyEl = h("div.plot.hidden"), empty = h("div.wave-empty.hidden");
+    const card = h("div.wave", h("div.wave-head", title, meta, warn, read, expand), h("div.wave-plot", plotEl, xyEl, empty));
     grid.appendChild(card);
     const plot = new WavePlot(plotEl, { readout: read, onZoom: (x0, x1) => zoomAll(x0, x1), onMeasure: (x0, x1) => setSpan([x0, x1]),
                                         onWheel: (x0, x1) => wheelZoom(x0, x1), onReset: () => { resetZoom(); load(true); } });
     plot.setRange(range);
     plot.setShow(lines);
     plot.setMouse(mouse);
-    const cells = Array.from({ length: 8 }, (_, i) => h(i ? "td.n" : "td"));
+    const cells = Array.from({ length: 9 }, (_, i) => h(i ? "td.n" : "td"));
     const row = h("tr", cells);
     measureRows.appendChild(row);
-    cards.push({ card, title, meta, warn, read, plot, empty, expand, row, cells, ch: null });
+    plot.setUnit(yUnit, mvPerAdc);
+    cards.push({ card, title, meta, warn, read, plot, empty, expand, row, cells, ch: null, plotEl, xyEl, xy: null,
+                 ring: new Ring(avgN), hist: new SampleHistogram(), accCh: null });
   }
   let lastBins = 0;
   const ro = new ResizeObserver(() => layout());
@@ -377,7 +402,15 @@ export function wavePanel(app, { onBoard } = {}) {
     text += " · " + t("{ns} ns per sample", { ns: fmtNum(boardInfo.sample_ns, boardInfo.sample_ns % 1 ? 1 : 0) });
     text += " · " + (t0 !== null ? t("time 0 = the trigger, sample {n}", { n: fmtInt(t0) })
                                  : t("time counted from the first sample (the trigger's place is not known)"));
-    if (mouse === "measure" && !span) text += " · " + t("drag across a plot to measure a range");
+    if (mouse === "measure" && !span && plotMode === "wave") text += " · " + t("drag across a plot to measure a range");
+    if (plotMode === "fft") text += " · " + t("FFT: the mean power of the newest {n} events, each with its mean taken off and a Hann window; 0 dBFS = a sine over the whole ADC range", { n: avgN });
+    if (plotMode === "hist") text += " · " + t("Histogram: the sample values of the {n} events taken so far", { n: seen });
+    if (plotMode === "wave" && avgN > 1) text += " · " + t("the mean of the newest {n} events", { n: avgN });
+    const wave = plotMode === "wave";
+    for (const g of [rangeGroup, linesGroup, mouseGroup, unitGroup]) g.classList.toggle("hidden", !wave);
+    avgGroup.classList.toggle("hidden", plotMode === "hist");
+    restartBtn.classList.toggle("hidden", wave && avgN === 1);
+    resetBtn.classList.toggle("hidden", !wave);
     setText(sub, text);
   }
 
@@ -512,8 +545,10 @@ export function wavePanel(app, { onBoard } = {}) {
     try {
       const bins = wantBins();
       lastBins = bins;
-      const q = { channels: chans.join(","), bins, x0: zoom ? zoom[0] : undefined, x1: zoom ? zoom[1] : undefined,
-                  m0: span ? span[0] : undefined, m1: span ? span[1] : undefined };
+      const full = plotMode !== "wave" || avgN > 1;            // every sample: the browser works them out
+      const q = full ? { channels: chans.join(","), full: 1, m0: span ? span[0] : undefined, m1: span ? span[1] : undefined }
+                     : { channels: chans.join(","), bins, x0: zoom ? zoom[0] : undefined, x1: zoom ? zoom[1] : undefined,
+                         m0: span ? span[0] : undefined, m1: span ? span[1] : undefined };
       let view;
       if (source === "file") view = await get("/api/files/waveforms", { ...q, path: file, event: eventNo });
       else {
@@ -530,6 +565,66 @@ export function wavePanel(app, { onBoard } = {}) {
     }
   }
 
+  // ---- the scope tools ----
+  function showPlot(x, ch, fresh) {
+    const wave = plotMode === "wave";
+    x.plotEl.classList.toggle("hidden", !wave);
+    x.xyEl.classList.toggle("hidden", wave);
+    if (x.accCh !== x.ch) { x.ring.clear(); x.hist.clear(); x.accCh = x.ch; }
+    const y = ch.present && ch.data ? ch.data.y : null;
+    if (wave && avgN === 1) { x.plot.setView(ch.present ? ch : null); return; }
+    if (wave) {                                          // the mean of the newest N waveforms
+      if (y && fresh) x.ring.add(Float64Array.from(y));
+      if (!x.ring.count) { x.plot.setView(null); return; }
+      const mean = x.ring.mean();
+      let base = 0;
+      for (let i = 0; i < Math.min(16, mean.length); i++) base += mean[i] / Math.min(16, mean.length);
+      x.plot.setView({ ...ch, present: true, data: { mode: "raw", x0: 0, step: 1, y: Array.from(mean) }, baseline: base, nsamps: mean.length });
+      clear(x.meta, t("mean of {k}", { k: x.ring.count }));
+      return;
+    }
+    if (!x.xy) x.xy = new XYPlot(x.xyEl, { readout: x.read });
+    if (plotMode === "fft") {
+      if (y && fresh && y.length > 8) { const ps = powerSpectrum(y); x.ring.add(ps.power); x.fftN = ps.n; x.fftM = ps.m; }
+      if (!x.ring.count) { x.xy.set([], [], {}); return; }
+      const sp = spectrumDb(x.ring.sum, x.ring.count, x.fftN, x.fftM, boardInfo.sample_ns, boardInfo.adc_max);
+      const f = sp.freq.slice(1), db = sp.db.slice(1);           // without the mean (0 Hz)
+      let k = 0;
+      for (let i = 1; i < db.length; i++) if (db[i] > db[k]) k = i;
+      x.xy.set(f, db, { xLabel: "MHz", yLabel: "dBFS", stepped: false, xFmt: (v) => `${fmtNum(v, 2)} MHz`, yFmt: (v) => `${fmtNum(v, 1)} dBFS` });
+      clear(x.meta, t("peak {f} MHz, {db} dBFS · mean of {k}", { f: fmtNum(f[k] || 0, 2), db: fmtNum(db[k] || 0, 1), k: x.ring.count }));
+      return;
+    }
+    if (y && fresh) x.hist.add(y);                       // the samples histogram
+    const b = x.hist.bins(300), st = x.hist.stats();
+    x.xy.set(b.xs, b.ys, { xLabel: b.width > 1 ? t("ADC ({w} codes a bin)", { w: b.width }) : "ADC", yLabel: t("entries"), stepped: true,
+                         xFmt: (v) => `ADC ${fmtInt(v)}${b.width > 1 ? `–${fmtInt(v + b.width - 1)}` : ""}`, yFmt: (v) => fmtInt(v) });
+    clear(x.meta, st.n ? `${fmtInt(st.n)} · μ ${fmtNum(st.mean, 1)} · σ ${fmtNum(st.std, 2)}` : null);
+  }
+
+  function setPlot(v) {
+    plotMode = v;
+    store("wave.plot", v);
+    plotSeg.set(v);
+    if (v !== "wave" && span) setSpan(null);
+    restart();
+  }
+
+  function setUnit(v) {
+    yUnit = v;
+    store("wave.unit", v);
+    unitSeg.set(v);
+    cards.forEach((c) => c.plot.setUnit(v, mvPerAdc));
+  }
+
+  function restart() {
+    cards.forEach((c) => { c.ring = new Ring(avgN); c.hist.clear(); c.accCh = c.ch; });
+    lastKey = null;
+    seen = 0;
+    showControls();
+    load(true);
+  }
+
   function clearPlots() {
     cards.forEach((x) => { x.plot.setView(null); setText(x.title, ""); });
   }
@@ -538,6 +633,11 @@ export function wavePanel(app, { onBoard } = {}) {
     const s = view.settings || {};
     boardInfo = { sample_ns: s.sample_ns || SAMPLE_NS, adc_max: s.adc_max || ADC_MAX, pre_trigger: s.pre_trigger,
                   record_length: s.record_length, model: s.model };
+    if (s.mv_per_adc && s.mv_per_adc !== mvPerAdc) { mvPerAdc = s.mv_per_adc; cards.forEach((c) => c.plot.setUnit(yUnit, mvPerAdc)); }
+    const key = `${view.source}|${view.board || view.path}|${view.event ?? ""}|${view.trigger_id}|${view.timestamp}`;
+    const fresh = key !== lastKey;                     // a new event: the means and histograms take it
+    lastKey = key;
+    if (fresh) seen += 1;
     eventFacts = { trigger_id: view.trigger_id, timestamp: view.timestamp };
     if (view.n_channels && view.n_channels !== nChannels) { nChannels = view.n_channels; loadSel(); showCards(); }
     const ref = view.channels.find((ch) => ch.trigger_at !== null && ch.trigger_at !== undefined);
@@ -559,7 +659,7 @@ export function wavePanel(app, { onBoard } = {}) {
       setText(x.empty, emptyText);
       clear(x.meta, ch.present && ch.data ? [h("span.wave-mu", `μ ${ch.mean.toFixed(0)} · `), `σ ${ch.std.toFixed(2)}`] : null);
       x.meta.title = ch.present && ch.data ? `${fmtInt(ch.nsamps)} ${t("samples")} · μ ${fmtNum(ch.mean, 1)} · σ ${fmtNum(ch.std, 2)} · baseline ${fmtNum(ch.baseline, 1)} · min ${fmtInt(ch.minimum)} · max ${fmtInt(ch.maximum)}` : "";
-      x.plot.setView(ch.present ? ch : null);
+      showPlot(x, ch, fresh);
       showMeasure(x, ch);
     });
     showControls();
@@ -570,9 +670,11 @@ export function wavePanel(app, { onBoard } = {}) {
     const ns = boardInfo.sample_ns;
     const values = !m || !m.n ? [] : [fmtInt(m.min), fmtInt(m.max), fmtNum(m.mean, 1), fmtNum(m.std, 2),
                                       (m.peak > 0 ? "+" : "") + fmtNum(m.peak, 1),
-                                      `${fmtInt(m.peak_at)} · ${fmtTime((m.peak_at - (t0 ?? 0)) * ns)}`, fmtInt(m.area)];
+                                      `${fmtInt(m.peak_at)} · ${fmtTime((m.peak_at - (t0 ?? 0)) * ns)}`,
+                                      m.first !== undefined ? `${fmtInt(m.first)} → ${fmtInt(m.last)} (${m.last - m.first >= 0 ? "+" : ""}${fmtInt(m.last - m.first)})` : "—",
+                                      fmtInt(m.area)];
     setText(x.cells[0], `ch${ch.ch}`);
-    for (let i = 1; i < 8; i++) setText(x.cells[i], values[i - 1] ?? "—");
+    for (let i = 1; i < 9; i++) setText(x.cells[i], values[i - 1] ?? "—");
     x.row.classList.toggle("muted", !values.length);
     x.row.title = !ch.present ? t("no waveform") : m && !m.n ? t("the waveform ends before the range")
                 : m ? t("{n} samples · baseline {b}", { n: fmtInt(m.n), b: fmtNum(ch.baseline, 1) }) : "";
@@ -597,7 +699,7 @@ export function wavePanel(app, { onBoard } = {}) {
       if (type === "config" && !tuneBox.classList.contains("hidden")) fillTune();
       combo.update(type);
     },
-    restyle() { cards.forEach((c) => { c.plot.restyle(); c.plot.setRange(range); c.plot.setShow(lines); c.plot.setMouse(mouse); c.plot.setSpan(span); }); load(true); combo.restyle(); },
-    unmount() { gone = true; clearInterval(timer); ro.disconnect(); cards.forEach((c) => c.plot.destroy()); combo.unmount(); },
+    restyle() { cards.forEach((c) => { c.plot.restyle(); c.plot.setRange(range); c.plot.setShow(lines); c.plot.setMouse(mouse); c.plot.setSpan(span); if (c.xy) c.xy.restyle(); }); load(true); combo.restyle(); },
+    unmount() { gone = true; clearInterval(timer); ro.disconnect(); cards.forEach((c) => { c.plot.destroy(); if (c.xy) c.xy.destroy(); }); combo.unmount(); },
   };
 }

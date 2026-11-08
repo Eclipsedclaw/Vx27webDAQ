@@ -30,7 +30,7 @@ from alab_daq import __version__
 from alab_daq.core import config as C
 from alab_daq.core import rawdata
 from alab_daq.core.system import disk_free, running_daq
-from alab_daq.web.files import board_lines, channel_view, combined_view, hk_table, side_json
+from alab_daq.web.files import board_lines, channel_view, combined_view, hk_table, mv_per_adc, side_json
 from alab_daq.web.settings import PROJECT, write_atomic
 
 KILL_AFTER_S = 15           # Kill is offered when the DAQ has not ended this long after Stop
@@ -582,7 +582,7 @@ class RunManager:
         return [{"name": b.name, "model": b.model, "channels": len(b.channels)} for _, b in cfg.active()]
 
     def live_waveforms(self, board: str, channels: list[int], x0: int, x1: int | None, bins: int,
-                       since: int | None, span: tuple[int, int] | None = None) -> dict:
+                       since: int | None, span: tuple[int, int] | None = None, full: bool = False) -> dict:
         if since is not None and since == self.live_seq:
             return {"same": True, "seq": self.live_seq}
         a = self.active
@@ -599,12 +599,13 @@ class RunManager:
                 continue
             samples = ev.waveform(c) if ev is not None else None
             out.append(channel_view(samples, b.channels[c].enabled, c, ev.trigger_id if ev is not None else None,
-                                    info["record_length"], x0, x1, bins, info["lines"][c], span, info["sample_ns"]))
+                                    info["record_length"], x0, x1, bins, info["lines"][c], span, info["sample_ns"], full))
         run_dir = a.run_dir if a else (self.last or {}).get("run_dir")
         return {"source": "live", "board": board, "seq": self.live_seq, "running": a is not None,
                 "timestamp": ev.timestamp if ev is not None else None, "trigger_id": ev.trigger_id if ev is not None else None,
                 "settings": {"source": "live", "run_dir": run_dir, "run": os.path.basename(run_dir) if run_dir else None,
-                             **{k: info[k] for k in ("record_length", "pre_trigger", "sample_ns", "adc_max", "model")}},
+                             **{k: info[k] for k in ("record_length", "pre_trigger", "sample_ns", "adc_max", "model")},
+                             "mv_per_adc": mv_per_adc(info)},
                 "channels": out, "n_channels": len(b.channels)}
 
     def live_combined(self, traces: list[tuple[str, int]], t_lo: float | None, t_hi: float | None, bins: int,

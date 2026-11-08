@@ -25,6 +25,7 @@ from alab_daq.core import models, rawdata, rootconv
 
 DATA_SUFFIXES = (".raw", ".root")
 MAX_BINS = 4000
+MAX_FULL = 1 << 16             # full=1 (FFT, histogram, averaging): at most this many samples of a channel
 BASELINE_SAMPLES = 16           # the baseline of a waveform: the mean of its first 16 samples (as CAEN's demo)
 BROWSE_LIMIT = 5000
 SUMMARY_EVENTS = 200
@@ -109,11 +110,13 @@ def measure(samples: np.ndarray, x0: int, x1: int, baseline: float, sample_ns: f
     d = part - baseline
     k = int(np.argmax(np.abs(d)))
     return {"x0": a, "x1": b, "n": b - a, "min": int(part.min()), "max": int(part.max()), "mean": float(part.mean()),
-            "std": float(part.std()), "peak": float(d[k]), "peak_at": a + k, "area": float(d.sum() * sample_ns)}
+            "std": float(part.std()), "peak": float(d[k]), "peak_at": a + k, "area": float(d.sum() * sample_ns),
+            "first": int(part[0]), "last": int(part[-1])}       # the values at the two edges (WaveDump2's cursors)
 
 
 def channel_view(samples, enabled: bool, ch: int, trigger, full_length: int, x0: int, x1: int | None, bins: int,
-                 lines: dict | None = None, span: tuple[int, int] | None = None, sample_ns: float = 8.0) -> dict:
+                 lines: dict | None = None, span: tuple[int, int] | None = None, sample_ns: float = 8.0,
+                 full: bool = False) -> dict:
     """What a waveform plot shows for one channel; lines: where the trigger and the threshold sit."""
     out = {"ch": ch, "enabled": enabled, "present": samples is not None, "trigger": trigger, **(lines or {})}
     if samples is None:
@@ -122,8 +125,10 @@ def channel_view(samples, enabled: bool, ch: int, trigger, full_length: int, x0:
     out.update(nsamps=int(len(s)), short=bool(full_length and len(s) < full_length), full_length=full_length)
     if len(s):
         baseline = float(s[:BASELINE_SAMPLES].mean())
+        data = ({"mode": "raw", "x0": 0, "step": 1, "y": s[:MAX_FULL].astype(int).tolist(), "cut": len(s) > MAX_FULL}
+                if full else envelope(s, x0, x1, bins))
         out.update(mean=float(s.mean()), std=float(s.std()), baseline=baseline, minimum=int(s.min()),
-                   maximum=int(s.max()), data=envelope(s, x0, x1, bins))
+                   maximum=int(s.max()), data=data)
         if span is not None:
             out["measure"] = measure(s, span[0], span[1], baseline, sample_ns)
     return out
@@ -437,7 +442,7 @@ class DataFiles:
                 **{k: lines[k] for k in ("record_length", "pre_trigger", "sample_ns", "adc_max", "model")}}
 
     def waveforms(self, path: str, k: int, channels: list[int], x0: int, x1: int | None, bins: int,
-                  span: tuple[int, int] | None = None) -> dict:
+                  span: tuple[int, int] | None = None, full: bool = False) -> dict:
         f = self.open(path)
         ev = f.event(k) if f.n else None
         info = f.lines()
@@ -449,12 +454,12 @@ class DataFiles:
                 bool(ev is not None and c in ev.channels)
             samples = ev.waveform(c) if ev is not None else None
             out.append(channel_view(samples, enabled, c, k, info["record_length"], x0, x1, bins, info["lines"][c],
-                                    span, info["sample_ns"]))
+                                    span, info["sample_ns"], full))
         return {"source": "file", "path": f.path, "event": k, "events": f.n, "board": f.board_header.get("name"),
                 "trigger_id": ev.trigger_id if ev is not None else None,
                 "timestamp": ev.timestamp if ev is not None else None,
                 "settings": {**f.settings(), **{x: info[x] for x in ("record_length", "pre_trigger", "sample_ns",
-                                                                     "adc_max", "model")}},
+                                                                     "adc_max", "model")}, "mv_per_adc": mv_per_adc(info)},
                 "channels": out, "n_channels": len(info["lines"])}
 
     def hk(self, path: str) -> dict:

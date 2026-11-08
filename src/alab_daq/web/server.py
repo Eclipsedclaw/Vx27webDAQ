@@ -497,7 +497,7 @@ async def files_waveforms(request):
     return await asyncio.to_thread(st.files.waveforms, request.query.get("path", ""), int_query(request, "event", 0, 0),
                                    channels_query(request), int_query(request, "x0", 0, 0),
                                    int_query(request, "x1", None, 0), int_query(request, "bins", 800, 16, 4000),
-                                   span_query(request))
+                                   span_query(request), request.query.get("full") == "1")
 
 
 @api("viewer")
@@ -511,7 +511,7 @@ async def live_waveforms(request):
     st: Station = request.app["station"]
     return st.runs.live_waveforms(request.query.get("board", ""), channels_query(request), int_query(request, "x0", 0, 0),
                                   int_query(request, "x1", None, 0), int_query(request, "bins", 800, 16, 4000),
-                                  int_query(request, "since", None), span_query(request))
+                                  int_query(request, "since", None), span_query(request), request.query.get("full") == "1")
 
 
 @api("viewer")

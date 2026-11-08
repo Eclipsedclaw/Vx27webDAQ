@@ -212,6 +212,10 @@ class RunTests(WebTestCase):
         self.assertEqual(len(v["channels"]), 6)
         self.assertEqual(v["channels"][1]["nsamps"], 256)
         self.assertEqual(v["channels"][1]["measure"]["n"], 30)
+        self.assertIn("first", v["channels"][1]["measure"])            # the values at the edges of the range
+        self.assertAlmostEqual(v["settings"]["mv_per_adc"], 2000 / 16384)
+        full = await (await self.client.get("/api/live/waveforms", params={"board": "b1", "channels": "0", "full": "1", "bins": "16"})).json()
+        self.assertEqual((full["channels"][0]["data"]["mode"], len(full["channels"][0]["data"]["y"])), ("raw", 256))   # every sample
         self.assertFalse(v["channels"][5]["present"])                    # not read out
         same = await (await self.client.get("/api/live/waveforms", params={"board": "b1", "since": v["seq"]})).json()
         self.assertTrue(same.get("same") or same.get("seq") != v["seq"])

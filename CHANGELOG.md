@@ -5,6 +5,10 @@ What changed in each version of ALAB DAQ. Write the notes of the next version un
 
 ## Unreleased
 
+## v0.0.7 (2026-11-08)
+
+- Scope tools (WaveDump2's plot panel) on the waveforms: Plot Waveforms, FFT (mean power of the newest N events, mean taken off, Hann window, dBFS) or Histogram (sample values over the events so far); the mean of the newest 4/16/64 waveforms; the y axis in ADC or mV from the baseline; the values at both edges of a measured range and their difference. The server sends every sample when asked (`full=1`, at most 65536 per channel) and each board's mV per count.
+
 ## v0.0.6 (2026-11-08)
 
 - Live controls and manual controller. During a run the server gives the DAQ program commands through the run's `control/` folder: **Force trigger** (a software trigger to `C.force_targets`: the master with AcceptTrg on TRG-OUT, which then also accepts SwTrg; every board when each triggers by itself) and **Tune…** on the waveforms (a channel's DCOffset or TriggerThr at once; *keep for the next runs* into the configuration); every change is logged and kept in status.json and run.json. The Boards tool's **manual controller** gets or sets one parameter of an idle board or sends it a command (`python -m alab_daq.daq param`); the simulated boards' parameter trees have types, allowed values, ranges and descriptions.
