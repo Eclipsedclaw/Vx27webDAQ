@@ -5,9 +5,13 @@ What changed in each version of ALAB DAQ. Write the notes of the next version un
 
 ## Unreleased
 
+## v0.0.12 (2026-11-08)
+
+- Pulse generator: one pulse per channel and record (the staircase only; the train is gone)
+
 ## v0.0.11 (2026-11-08)
 
-- Plots first, the boards' setup, and a pulse generator. The Run page gives the plots the left and puts their controls into the right column's tab **Plot**, beside **Progress** and the new **Setup** (setupview.js: the boards and their clock, trigger and GPIO cables drawn from the configuration's plans, with live state and sync offsets). Channel plots share one dashed cursor line labelled with sample and time, and each can have its own y range; the combined view gives sample numbers on its time axis, at its cursor and per trace, and has a y range (Auto, from–to, ± N). The simulator's pulse generator (Settings: simulated signal; `--generator staircase|train`, `--spacing-us`): regular hits, a full pulse on every channel, negative on a V2730 and positive on a V2740, channel k at k µs (staircase) or a pulse every µs (train). Fixed: the DAQ program's log lines could mix when board readers logged at once; the build-events toggle showed the wrong label.
+- Plots first, the boards' setup, and a pulse generator. The Run page gives the plots the left and puts their controls into the right column's tab **Plot**, beside **Progress** and the new **Setup** (setupview.js: the boards and their clock, trigger and GPIO cables drawn from the configuration's plans, with live state and sync offsets). Channel plots share one dashed cursor line labelled with sample and time, and each can have its own y range; the combined view gives sample numbers on its time axis, at its cursor and per trace, and has a y range (Auto, from–to, ± N). The simulator's pulse generator (Settings: simulated signal; `--generator staircase`, `--spacing-us`): regular hits, and in every record one full pulse on each channel, negative on a V2730 and positive on a V2740, channel k at k µs after the trigger. Fixed: the DAQ program's log lines could mix when board readers logged at once; the build-events toggle showed the wrong label.
 
 ## v0.0.10 (2026-11-08)
 

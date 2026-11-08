@@ -31,8 +31,7 @@ export function settingsPage(root, app) {
     const v = values[key];
     const mark = (val) => { changes[key] = val; saveBtn.disabled = false; };
     if (kind === "choice") {
-      const names = { "": t("random hits (the simulator options)"), staircase: t("pulse generator: staircase (channel k at k × 1 µs)"),
-                      train: t("pulse generator: a train (a pulse every 1 µs on every channel)") };
+      const names = { "": t("random hits (the simulator options)"), staircase: t("pulse generator: one pulse per channel and record, channel k at k × 1 µs") };
       const el = h("select.input", { disabled: !can, onchange: () => mark(el.value) },
                    ((app.state.settings.choices || {})[key] || []).map((c) => h("option", { value: c }, names[c] || c)));
       el.value = String(v ?? "");

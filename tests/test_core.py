@@ -270,10 +270,10 @@ class ConfigTests(unittest.TestCase):
 
 
 class GeneratorTests(unittest.TestCase):
-    def test_staircase_and_train(self):
+    def test_staircase(self):
         """The simulator's pulse generator: regular hits, a full pulse on every channel, negative on a V2730 and
         positive on a V2740; staircase: channel k k x 1 us after the trigger, again from the trigger when the
-        record is full; train: a pulse every 1 us on every channel."""
+        record is full; one pulse per channel and record."""
         from alab_daq.daq.sim import Crate
         cr = Crate("--generator staircase --rate 10", "none", {"a": "VX2730", "b": "VX2740"}, {"a": 16, "b": 64})
         a, b = cr.open("x", "a"), cr.open("y", "b")
@@ -288,12 +288,11 @@ class GeneratorTests(unittest.TestCase):
         self.assertEqual([s - start_b[0] for s in start_b], [0, 125, 125])      # = 125 samples of 8 ns; ch5 like ch1
         self.assertLess(wa[0].min() - wa[0][:16].mean(), -500)                  # negative on the V2730
         self.assertGreater(wb[0].max() - wb[0][:16].mean(), 500)                # positive on the V2740
-        tr = Crate("--generator train --rate 10", "none", {"b": "VX2740"}).open("y", "b")
-        tr.set("/par/RecordLengthS", "512")
-        tr.set("/par/PreTriggerS", "128")
-        w = tr.waveforms([7], 1, 512)[0].astype(float) - 32768
-        rises = np.nonzero((w[1:] > 300) & (w[:-1] <= 300))[0]
-        self.assertEqual(len(rises), 4)                                       # 0, 1, 2, 3 us after the trigger
+        for w in list(wb) + [b.waveforms([c], 1, 512)[0] for c in range(8, 64, 7)]:   # one pulse in each record
+            d = w.astype(float) - w[:16].mean()
+            self.assertEqual(len(np.nonzero((d[1:] > 300) & (d[:-1] <= 300))[0]), 1)
+        with self.assertRaises(ValueError):
+            Crate("--generator train")                                         # (several pulses a record: not wanted)
 
 
 class SyncCheckTests(unittest.TestCase):

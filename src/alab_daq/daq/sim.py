@@ -18,11 +18,10 @@ Options (a string, as on the Settings page): --rate HZ (20), --share P (0.5), --
 --noise SIGMA (3), --seed N, and failures for the tests: --fail open:NAME, param:NAME:PARAM, read:NAME:N,
 nostop:NAME, unarmed:NAME (the board does not take the arm command), errflags:NAME:S (ErrorFlags 0x800 from S
 seconds into the run on).
---generator staircase|train turns the random hits into a pulse generator, to see clear waveforms: hits come
-regularly (--rate per second), every channel of every board gets a pulse of the full --amplitude, negative on a
-V2730, positive on a V2740/V2745; staircase: channel k's pulse comes k x --spacing-us (1 us) after the trigger,
-starting again from the trigger when the record has no room left; train: every channel gets a pulse at the
-trigger and every --spacing-us after it, to the end of the record.
+--generator staircase turns the random hits into a pulse generator, to see clear waveforms: hits come
+regularly (--rate per second), and in every record each channel of every board has one pulse of the full
+--amplitude, negative on a V2730, positive on a V2740/V2745: channel k's pulse comes k x --spacing-us (1 us)
+after the trigger, starting again from the trigger when the record has no room left.
 Housekeeping: the temperatures rise slowly while the board runs; TriggerCnt counts its triggers, the dead time is
 1 µs per event, a channel's SelfTrgRate is the rate of hits on it.
 """
@@ -206,7 +205,7 @@ def parse_options(text: str) -> argparse.Namespace:
     ap.add_argument("--noise", type=float, default=3.0)
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--fail", action="append", default=[])
-    ap.add_argument("--generator", choices=("staircase", "train"), default=None)
+    ap.add_argument("--generator", choices=("staircase",), default=None)
     ap.add_argument("--spacing-us", type=float, default=1.0)
     try:
         args, rest = ap.parse_known_args(shlex.split(text or ""))
@@ -610,10 +609,8 @@ class SimBoard:
                 room = n - pre - max(2.0, 50.0 / self.sample_ns())                   # where a pulse still shows
                 fit = max(1, int(room // step) + 1) if step > 0 else 1
                 sign = -1.0 if self.m.family == "2730" else 1.0
-                if gen == "train":
-                    train = sum(pulse(pre - 2 + j * step) for j in range(fit))
-                for i, c in enumerate(channels):
-                    w[i] += sign * amp[c] * (train if gen == "train" else pulse(pre - 2 + (c % fit) * step))
+                for i, c in enumerate(channels):          # one pulse per channel and record
+                    w[i] += sign * amp[c] * pulse(pre - 2 + (c % fit) * step)
             else:
                 shape = pulse(pre - 2)
                 for i, c in enumerate(channels):

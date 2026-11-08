@@ -541,7 +541,7 @@ class BrowseTests(WebTestCase):
         self.assertEqual(r.status, 200, await r.text())
         self.assertEqual(self.station.settings.sim_options(), self.options + " --generator staircase")
         s = await (await self.client.get("/api/settings")).json()
-        self.assertEqual(s["choices"]["simulator_pulses"], ["", "staircase", "train"])
+        self.assertEqual(s["choices"]["simulator_pulses"], ["", "staircase"])
 
     async def test_default_configuration_file(self):
         """The configuration file of the settings is not there yet (the NAS default on a new computer): the server

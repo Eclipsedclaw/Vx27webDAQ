@@ -39,7 +39,7 @@ class ServerSettings:
     caen_lib_dir: str = str(PROJECT / "caen" / "lib")      # libCAEN_FELib.so and libCAEN_Dig2.so (caen_libs.sh)
     use_simulator: bool = False
     simulator_options: str = "--rate 20"
-    simulator_pulses: str = ""      # "": random hits; staircase / train: the simulator's pulse generator
+    simulator_pulses: str = ""      # "": random hits; staircase: the simulator's pulse generator (one pulse per record)
     runs_dir: str = ""              # run records and users' outputs; empty: ~/ALAB_DAQ_runs
     data_dirs: list[str] = field(default_factory=lambda: [DEFAULT_DATA_DIR])  # more folders of data files to open
     convert_to_root: bool = True    # after every run, its .raw files are converted to .root
@@ -72,7 +72,7 @@ SETTING_KINDS = {"config_file": "file", "caen_lib_dir": "folder", "runs_dir": "f
                  "guests": "admin"}
 
 
-SETTING_CHOICES = {"simulator_pulses": ["", "staircase", "train"]}
+SETTING_CHOICES = {"simulator_pulses": ["", "staircase"]}
 
 
 def settings_path() -> Path:
