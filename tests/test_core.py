@@ -270,29 +270,31 @@ class ConfigTests(unittest.TestCase):
 
 
 class GeneratorTests(unittest.TestCase):
-    def test_staircase(self):
-        """The simulator's pulse generator: regular hits, a full pulse on every channel, negative on a V2730 and
-        positive on a V2740; staircase: channel k k x 1 us after the trigger, again from the trigger when the
-        record is full; one pulse per channel and record."""
+    def test_generator(self):
+        """The simulator's pulse generator: regular hits; a V2730 has a fast negative pulse on every channel at the
+        trigger; a V2740 a positive pulse rising in 5 us (10-90 %) and decaying in 1 ms, channel k k x 5 us later
+        (none where that is after the end of the record)."""
         from alab_daq.daq.sim import Crate
         cr = Crate("--generator staircase --rate 10", "none", {"a": "VX2730", "b": "VX2740"}, {"a": 16, "b": 64})
         a, b = cr.open("x", "a"), cr.open("y", "b")
-        for board, rec, pre in ((a, 2048, 512), (b, 512, 128)):
+        for board, rec, pre in ((a, 2048, 512), (b, 4096, 128)):
             board.set("/par/RecordLengthS", str(rec))
             board.set("/par/PreTriggerS", str(pre))
         self.assertEqual([round(t, 3) for t, _ in cr.hits(0.0, 0.5)], [0.1, 0.2, 0.3, 0.4, 0.5])
-        wa, wb = a.waveforms([0, 1, 3, 4], 1, 2048), b.waveforms([0, 1, 5], 1, 512)
-        start_a = [int(np.argmax(w[:16].mean() - w > 100)) for w in wa]        # where each pulse begins
-        start_b = [int(np.argmax(w - w[:16].mean() > 100)) for w in wb]
-        self.assertEqual([s - start_a[0] for s in start_a], [0, 500, 1500, 0])  # 1 us = 500 samples of 2 ns
-        self.assertEqual([s - start_b[0] for s in start_b], [0, 125, 125])      # = 125 samples of 8 ns; ch5 like ch1
-        self.assertLess(wa[0].min() - wa[0][:16].mean(), -500)                  # negative on the V2730
-        self.assertGreater(wb[0].max() - wb[0][:16].mean(), 500)                # positive on the V2740
-        for w in list(wb) + [b.waveforms([c], 1, 512)[0] for c in range(8, 64, 7)]:   # one pulse in each record
-            d = w.astype(float) - w[:16].mean()
-            self.assertEqual(len(np.nonzero((d[1:] > 300) & (d[:-1] <= 300))[0]), 1)
-        with self.assertRaises(ValueError):
-            Crate("--generator train")                                         # (several pulses a record: not wanted)
+        wa = a.waveforms([0, 1, 7, 15], 1, 2048).astype(float)
+        da = wa - wa[:, :16].mean(axis=1, keepdims=True)
+        self.assertEqual(len({int(np.argmax(x < -100)) for x in da}), 1)      # every channel begins at the same time
+        self.assertTrue(all(x.min() < -500 for x in da))                        # negative
+        wb = b.waveforms([0, 1, 2, 63], 1, 4096).astype(float)                   # 4096 samples of 8 ns: 32.8 us
+        db = wb - wb[:, :16].mean(axis=1, keepdims=True)
+        start = [int(np.argmax(x > 30)) for x in db[:3]]
+        for got, want in zip([s - start[0] for s in start], [0, 625, 1250]):   # 5 us = 625 samples of 8 ns
+            self.assertLessEqual(abs(got - want), 2)                            # (noise moves a crossing a sample)
+        top = db[0].max()
+        k10, k90 = int(np.argmax(db[0] > 0.1 * top)), int(np.argmax(db[0] > 0.9 * top))   # 10 % and 90 % of its peak
+        self.assertAlmostEqual((k90 - k10) * 8 / 1000, 5.0, delta=0.3)          # a 5 us rise
+        self.assertGreater(db[0][-1], 500)                                      # a 1 ms decay: still high at 33 us
+        self.assertLess(np.abs(db[3]).max(), 30)                                # ch63 at 315 us: not in this record
 
 
 class SyncCheckTests(unittest.TestCase):

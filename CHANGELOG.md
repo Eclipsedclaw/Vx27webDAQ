@@ -5,6 +5,10 @@ What changed in each version of ALAB DAQ. Write the notes of the next version un
 
 ## Unreleased
 
+## v0.0.14 (2026-11-08)
+
+- Pulse generator: on a VX2730 every channel has a fast negative pulse at the same time (the trigger); on a VX2740 a positive pulse with a 5 µs rise (10–90 %) and a 1 ms decay, channel k at k × 5 µs (`--rise-us`, `--decay-us`, `--spacing-us`); no wrapping back to the trigger.
+
 ## v0.0.13 (2026-11-08)
 
 - Every file chooser opens at /NAS/ALAB_DAQ_DATA/ (when it exists and is a data folder): data files, configurations, folders.

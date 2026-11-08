@@ -20,8 +20,9 @@ nostop:NAME, unarmed:NAME (the board does not take the arm command), errflags:NA
 seconds into the run on).
 --generator staircase turns the random hits into a pulse generator, to see clear waveforms: hits come
 regularly (--rate per second), and in every record each channel of every board has one pulse of the full
---amplitude, negative on a V2730, positive on a V2740/V2745: channel k's pulse comes k x --spacing-us (1 us)
-after the trigger, starting again from the trigger when the record has no room left.
+--amplitude. A V2730: every channel at the same time, at the trigger, a fast negative pulse. A V2740/V2745: a
+positive pulse with a --rise-us (5 us, 10-90 %) rise and a --decay-us (1000 us) decay, channel k's coming
+k x --spacing-us (5 us) after the trigger (a channel whose pulse comes after the end of the record shows none).
 Housekeeping: the temperatures rise slowly while the board runs; TriggerCnt counts its triggers, the dead time is
 1 µs per event, a channel's SelfTrgRate is the rate of hits on it.
 """
@@ -30,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import functools
 import math
 import shlex
 import threading
@@ -197,6 +199,22 @@ def channel_params(m: models.Model) -> dict:
     return p
 
 
+@functools.lru_cache(maxsize=32)
+def rise_constant(rise_ns: float, decay_ns: float) -> float:
+    """The time constant r of (1 - exp(-t/r)) exp(-t/decay) whose 10-90 % rise (of its own peak) is rise_ns."""
+    def rise(r):
+        top = math.log1p(decay_ns / r) * r
+        t = np.linspace(0.0, top, 40001)
+        s = (1 - np.exp(-t / r)) * np.exp(-t / decay_ns)
+        peak = s[-1]
+        return t[np.argmax(s >= 0.9 * peak)] - t[np.argmax(s >= 0.1 * peak)]
+    lo, hi = rise_ns / 20, rise_ns
+    for _ in range(50):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if rise(mid) < rise_ns else (lo, mid)
+    return (lo + hi) / 2
+
+
 def parse_options(text: str) -> argparse.Namespace:
     ap = argparse.ArgumentParser(prog="simulator", add_help=False, exit_on_error=False)
     ap.add_argument("--rate", type=float, default=20.0)
@@ -206,7 +224,9 @@ def parse_options(text: str) -> argparse.Namespace:
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--fail", action="append", default=[])
     ap.add_argument("--generator", choices=("staircase",), default=None)
-    ap.add_argument("--spacing-us", type=float, default=1.0)
+    ap.add_argument("--spacing-us", type=float, default=5.0)
+    ap.add_argument("--rise-us", type=float, default=5.0)
+    ap.add_argument("--decay-us", type=float, default=1000.0)
     try:
         args, rest = ap.parse_known_args(shlex.split(text or ""))
     except (argparse.ArgumentError, SystemExit) as err:
@@ -599,18 +619,23 @@ class SimBoard:
             pre = int(self.p("pretriggers"))
             tau = max(2.0, 120.0 / self.sample_ns())         # 120 ns decay
             rise = max(1.0, 8.0 / self.sample_ns())
-            def pulse(start):                              # one pulse beginning at sample `start`
-                k = np.arange(n) - start
-                s = np.where(k < 0, 0.0, (1 - np.exp(-np.maximum(k, 0) / rise)) * np.exp(-np.maximum(k, 0) / tau))
-                return s / max(s.max(), 1e-9)
+            def pulse(start, r=rise, d=tau):               # one pulse beginning at sample `start`, peak 1
+                k = np.maximum(np.arange(n) - start, 0)
+                s = np.where(np.arange(n) < start, 0.0, (1 - np.exp(-k / r)) * np.exp(-k / d))
+                top = math.log1p(d / r) * r                                  # where the shape peaks
+                return s / max((1 - math.exp(-top / r)) * math.exp(-top / d), 1e-12)
             gen = self.crate.opt.generator
             if gen:
-                step = self.crate.opt.spacing_us * 1000.0 / self.sample_ns()        # samples between pulses
-                room = n - pre - max(2.0, 50.0 / self.sample_ns())                   # where a pulse still shows
-                fit = max(1, int(room // step) + 1) if step > 0 else 1
-                sign = -1.0 if self.m.family == "2730" else 1.0
-                for i, c in enumerate(channels):          # one pulse per channel and record
-                    w[i] += sign * amp[c] * pulse(pre - 2 + (c % fit) * step)
+                if self.m.family == "2730":             # every channel at once, a fast negative pulse
+                    shape = pulse(pre - 2)
+                    for i, c in enumerate(channels):
+                        w[i] -= amp[c] * shape
+                else:                                     # slow positive pulses, channel k k x spacing later
+                    ns, o = self.sample_ns(), self.crate.opt
+                    r = max(0.5, rise_constant(o.rise_us * 1000.0, o.decay_us * 1000.0) / ns)
+                    d = max(1.0, o.decay_us * 1000.0 / ns)
+                    for i, c in enumerate(channels):
+                        w[i] += amp[c] * pulse(pre + c * o.spacing_us * 1000.0 / ns, r, d)
             else:
                 shape = pulse(pre - 2)
                 for i, c in enumerate(channels):

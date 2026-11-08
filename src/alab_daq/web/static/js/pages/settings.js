@@ -31,7 +31,7 @@ export function settingsPage(root, app) {
     const v = values[key];
     const mark = (val) => { changes[key] = val; saveBtn.disabled = false; };
     if (kind === "choice") {
-      const names = { "": t("random hits (the simulator options)"), staircase: t("pulse generator: one pulse per channel and record, channel k at k × 1 µs") };
+      const names = { "": t("random hits (the simulator options)"), staircase: t("pulse generator: VX2730 a fast negative pulse on every channel at once; VX2740 a slow positive pulse (5 µs rise, 1 ms decay), channel k at k × 5 µs") };
       const el = h("select.input", { disabled: !can, onchange: () => mark(el.value) },
                    ((app.state.settings.choices || {})[key] || []).map((c) => h("option", { value: c }, names[c] || c)));
       el.value = String(v ?? "");
@@ -69,7 +69,7 @@ export function settingsPage(root, app) {
 
   function hints(key) {
     if (key === "runs_dir") grid.append(h("span.hint.hint-cell", t("Every run gets a folder here (configuration, DAQ log, status, run.json); users' conversions go to users/<name>/.")));
-    if (key === "simulator_options") grid.append(h("span.hint.hint-cell", t("--rate HZ: hits per second; --share P: the part of the channels a hit reaches; --amplitude COUNTS; --noise SIGMA; --seed N; --spacing-us US: the pulse generator's spacing (1 µs); --fail open:NAME, param:NAME:PARAM, read:NAME:N, nostop:NAME or unarmed:NAME imitates a failure of board NAME")));
+    if (key === "simulator_options") grid.append(h("span.hint.hint-cell", t("--rate HZ: hits per second; --share P: the part of the channels a hit reaches; --amplitude COUNTS; --noise SIGMA; --seed N; --spacing-us US, --rise-us US, --decay-us US: the VX2740 pulses of the generator (5, 5, 1000 µs); --fail open:NAME, param:NAME:PARAM, read:NAME:N, nostop:NAME or unarmed:NAME imitates a failure of board NAME")));
     if (key === "simulator_pulses") grid.append(h("span.hint.hint-cell", t("the pulse generator: every channel of every board gets a full pulse at each hit (--rate a second, at regular times), negative on a VX2730 and positive on a VX2740, so the waveforms are easy to read; the boards line up in the combined view")));
     if (key === "caen_lib_dir") {
       const libs = app.state.settings.caen_libs || {};
