@@ -5,6 +5,10 @@ What changed in each version of ALAB DAQ. Write the notes of the next version un
 
 ## Unreleased
 
+## v0.0.18 (2026-11-08)
+
+- The save folder (run records and users' outputs) is /NAS/ALAB_DAQ_DATA by default, also when the saved setting is empty (it was ~/ALAB_DAQ_runs of the service account); a run that cannot make its folder there says why.
+
 ## v0.0.17 (2026-11-08)
 
 - Simulated runs write their data into the data folder's `simulated/` subfolder (e.g. /NAS/ALAB_DAQ_DATA/simulated/run00001_BOARD.raw), numbered on their own, instead of inside the run folder; the Start question and the summary say where. A run does not make the data folder itself (the NAS not mounted).

@@ -609,6 +609,9 @@ class BrowseTests(WebTestCase):
         starts with the lab's setup, and Save writes it there."""
         self.assertEqual(ServerSettings().config_file, "/NAS/ALAB_DAQ_DATA/alab_daq_test.json")
         self.assertEqual(ServerSettings().data_dirs, ["/NAS/ALAB_DAQ_DATA"])
+        self.assertEqual(ServerSettings().runs_folder(), "/NAS/ALAB_DAQ_DATA")         # the save folder
+        self.assertEqual(ServerSettings(runs_dir="").runs_folder(), "/NAS/ALAB_DAQ_DATA")  # an old saved empty value
+        self.assertEqual(ServerSettings(runs_dir="x").runs_folder(), os.path.join(os.path.expanduser("~"), "x"))
         self.assertEqual(C.RunSettings().data_dir, "/NAS/ALAB_DAQ_DATA")
         missing = os.path.join(self.root, "nas", "alab_daq_test.json")
         os.makedirs(os.path.dirname(missing))

@@ -20,7 +20,7 @@ from alab_daq.core.config import DEFAULT_CONFIG_FILE, DEFAULT_DATA_DIR
 
 PROJECT = Path(__file__).resolve().parents[3]      # the source folder, or the build
 DEFAULT_PORT = 8770
-DEFAULT_RUNS = "ALAB_DAQ_runs"                      # in the home folder, when no save folder is given
+DEFAULT_RUNS = DEFAULT_DATA_DIR                     # the save folder when none is given: the lab's NAS
 
 
 def config_dir() -> Path:
@@ -40,7 +40,7 @@ class ServerSettings:
     use_simulator: bool = False
     simulator_options: str = "--rate 20"
     simulator_pulses: str = ""      # "": random hits; staircase: the simulator's pulse generator (one pulse per record)
-    runs_dir: str = ""              # run records and users' outputs; empty: ~/ALAB_DAQ_runs
+    runs_dir: str = DEFAULT_RUNS    # run records and users' outputs; empty: /NAS/ALAB_DAQ_DATA too
     data_dirs: list[str] = field(default_factory=lambda: [DEFAULT_DATA_DIR])  # more folders of data files to open
     convert_to_root: bool = True    # after every run, its .raw files are converted to .root
     build_events: bool = True       # after a run of several boards, also RUN_built.root: every board per trigger
@@ -48,7 +48,8 @@ class ServerSettings:
     guests: bool = True             # people who are not signed in may view and use the viewer tools
 
     def runs_folder(self) -> str:
-        """The save folder: a relative path counts from the home folder of the service account."""
+        """The save folder (empty: /NAS/ALAB_DAQ_DATA): a relative path counts from the home folder of the service
+        account."""
         return os.path.join(os.path.expanduser("~"), os.path.expanduser(self.runs_dir.strip()) or DEFAULT_RUNS)
 
     def sim_options(self) -> str:

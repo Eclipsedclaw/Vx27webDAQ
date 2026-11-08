@@ -176,7 +176,11 @@ class RunManager:
         run_dir, n = base, 1
         while os.path.exists(run_dir):
             run_dir, n = f"{base}_{n}", n + 1
-        os.makedirs(run_dir)
+        try:
+            os.makedirs(run_dir)
+        except OSError as err:
+            raise RunError(f"cannot make the run folder {run_dir}: {err} (is the save folder there, e.g. the NAS "
+                           "mounted, and writable by the service account?)") from None
         if s.use_simulator:         # simulated data: DATA_FOLDER/simulated/, never among the real runs' files
             root = os.path.expanduser(cfg.run.data_dir)
             sim_dir = os.path.join(root, SIM_FOLDER)
