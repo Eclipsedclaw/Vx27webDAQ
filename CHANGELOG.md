@@ -5,6 +5,10 @@ What changed in each version of ALAB DAQ. Write the notes of the next version un
 
 ## Unreleased
 
+## v0.0.9 (2026-11-08)
+
+- Every board per trigger, and text export. `core/eventbuild.py` writes `RUN_built.root` (WaveDump2's multi-board single file): one entry per event of the first board, each board's event with the same trigger ID (continuous over the 24-bit wrap) within the sync window, with found flags, timestamp differences and the samples; queued after every run of several boards (Settings: build_events) and from the Data file tool. The Data file tool also downloads events as text (WaveDump2's ASCII layout).
+
 ## v0.0.8 (2026-11-08)
 
 - Front panel, test signals and the second channel logic. Each board's TRG-OUT, GPIO, acquisition veto (source, width, polarity), hardware start of the master (S-IN level or edge, first trigger, LVDS, P0), timestamp reset and DAC OUT (level, ramp, sine, square, pulse emulator, channel copy) can be set (WaveDump2's Board settings), with checks where they would break the trigger chain; settings whose names a board may not have are optional (a refusal is a warning). The board trigger can use ITLB too: logic A, B, A AND B or A OR B, each channel in group A or B. A hardware start makes the DAQ wait for the master's start signal instead of sending SwStartAcquisition.

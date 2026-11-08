@@ -299,6 +299,10 @@ class OpenFile:
             except Exception as err:            # uproot raises many kinds for files of other programs
                 self.root.close()
                 raise rawdata.RawFormatError(f"{os.path.basename(path)} is not a ROOT file of ALAB DAQ ({err})") from None
+            if self.header.get("format") == "alab-daq-built":
+                self.root.close()
+                raise rawdata.RawFormatError(f"{os.path.basename(path)} holds every board of a run per trigger: open it in "
+                                             "ROOT (TTree events); the page shows one board's files")
             self.n = int(self.tree.num_entries)
             self.truncated = bool(self.header.get("truncated"))
             self.channels = sorted(int(k[2:]) for k in self.tree.keys() if k.startswith("ch") and k[2:].isdigit())
@@ -470,6 +474,35 @@ class DataFiles:
         if not os.path.isfile(hk):
             return {**out, "path": hk, "rows": 0, "columns": {}, "missing": True}
         return {**out, **hk_table(hk)}
+
+    def export_text(self, path: str, first: int, count: int, channels: list[int]) -> tuple[str, str]:
+        """Events first … first+count-1 of a data file as text (WaveDump2's ASCII file): per event the header
+        lines, then one row per sample with a column per channel; (text, file name)."""
+        f = self.open(path)
+        info = f.lines()
+        last = min(f.n, first + count)
+        if first >= f.n:
+            raise IndexError(f"event {first} of {f.n}")
+        out = [f"# ALAB DAQ text export of {os.path.basename(f.path)}: board {f.board_header.get('name')}"
+               f" ({f.board_header.get('model')}), run {f.header.get('run')}, events {first} to {last - 1}",
+               "# per event: Event number, Timestamp (8 ns ticks), Samples, Sampling period (us), Channels;"
+               " then one row per sample, one column per channel (ADC counts)"]
+        total = 0
+        for k in range(first, last):
+            ev = f.event(k)
+            chans = [c for c in (channels or ev.channels) if c in ev.channels]
+            waves = [ev.waveform(c) for c in chans]
+            n = len(waves[0]) if waves else 0
+            total += n * len(chans)
+            if total > 20_000_000:
+                raise ValueError("too many samples for one text file: ask for fewer events or channels")
+            out += [f"Event number: {k}", f"Timestamp: {ev.timestamp}", f"Samples: {n}",
+                    f"Sampling period: {info['sample_ns'] / 1000:g}", "Channels: " + " ".join(str(c) for c in chans)]
+            if waves:
+                block = np.stack(waves, axis=1)
+                out += ["\t".join(str(int(v)) for v in row) for row in block]
+        base = os.path.splitext(os.path.basename(f.path))[0]
+        return "\n".join(out) + "\n", f"{base}_events{first}-{last - 1}.txt"
 
     def run_files(self, f: OpenFile) -> dict[str, list[OpenFile]]:
         """The files of the same run as f in its folder, one board each (in parts: _001, ...): {board: [files]}."""

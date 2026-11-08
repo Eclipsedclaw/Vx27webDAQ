@@ -294,6 +294,21 @@ class RunTests(WebTestCase):
         self.assertEqual(wr["channels"][0]["data"]["y"], wraw["channels"][0]["data"]["y"])     # ROOT = raw
         ov = await (await self.client.get("/api/files/overview", params={"path": root})).json()
         self.assertEqual(ov["boards"][0]["channels"], 32)
+        built = os.path.join(os.path.dirname(files[0]), "run00001_built.root")      # every board per trigger
+        async def built_ready():
+            return os.path.exists(built) and not self.station.converter.busy()
+        await self.wait(built_ready, 60, "the event-built ROOT file")
+        with open(os.path.join(run_dir, "run.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["root_files"]["built"]["status"], "ok")
+        r = await self.client.get("/api/files/info", params={"path": built})
+        self.assertEqual(r.status, 400)                                  # not one board's file
+        ex = await self.client.get("/api/files/export", params={"path": files[1], "first": 1, "count": 2, "channels": "0,1"})
+        text = await ex.text()
+        self.assertEqual(ex.status, 200, text)
+        self.assertIn("attachment", ex.headers["Content-Disposition"])
+        self.assertIn("Event number: 2", text)
+        self.assertIn("Channels: 0 1", text)
+        self.assertEqual(text.count("Event number:"), 2)
         cr = await (await self.client.get("/api/files/combined", params={"path": root, "event": 2, "traces": "b0:0,b1:1"})).json()
         self.assertTrue(cr["matched"])                                  # ROOT files pair by trigger ID too
         self.assertEqual(len({b["trigger_id"] for b in cr["boards"]}), 1)

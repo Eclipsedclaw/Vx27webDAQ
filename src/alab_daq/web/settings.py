@@ -42,6 +42,7 @@ class ServerSettings:
     runs_dir: str = ""              # run records and users' outputs; empty: ~/ALAB_DAQ_runs
     data_dirs: list[str] = field(default_factory=lambda: [DEFAULT_DATA_DIR])  # more folders of data files to open
     convert_to_root: bool = True    # after every run, its .raw files are converted to .root
+    build_events: bool = True       # after a run of several boards, also RUN_built.root: every board per trigger
     refresh_ms: int = 500           # how often the live view asks for new waveforms
     guests: bool = True             # people who are not signed in may view and use the viewer tools
 
@@ -61,7 +62,7 @@ class ServerSettings:
 
 # what each setting is, for the Settings page; "admin": only admins may change it
 SETTING_KINDS = {"config_file": "file", "caen_lib_dir": "folder", "runs_dir": "folder", "data_dirs": "folders",
-                 "use_simulator": "bool", "simulator_options": "text", "convert_to_root": "bool", "refresh_ms": "int",
+                 "use_simulator": "bool", "simulator_options": "text", "convert_to_root": "bool", "build_events": "bool", "refresh_ms": "int",
                  "guests": "admin"}
 
 

@@ -10,7 +10,9 @@ const FIELDS = [
   ["runs_dir", T("save folder (run records and users' outputs)"), "folder"],
   ["data_dirs", T("more data folders users may open (one per line)"), "folders"],
   ["use_simulator", T("simulator"), "bool"], ["simulator_options", T("simulator options"), "text"],
-  ["convert_to_root", T("Convert to ROOT after the run"), "bool"], ["refresh_ms", T("refresh (ms)"), "int"],
+  ["convert_to_root", T("Convert to ROOT after the run"), "bool"],
+  ["build_events", T("After a run of several boards: one ROOT file of every board per trigger (RUN_built.root)"), "bool"],
+  ["refresh_ms", T("refresh (ms)"), "int"],
 ];
 const PICK = { config_file: CONF_FILES };
 

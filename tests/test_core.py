@@ -576,6 +576,34 @@ class DaqRunTests(unittest.TestCase):
         self.assertEqual(code, 0, log)
         self.assertLess(status_and["boards"][0]["events"], status["boards"][0]["events"])
 
+    def test_event_building(self):
+        """Every board of a run in one ROOT file, one entry per trigger of the first board."""
+        import uproot
+        from alab_daq.core import eventbuild
+        cfg = small(C.lab_setup(), seconds=2)
+        code, log, status, d = run_daq("built", cfg, options="--rate 30 --seed 8")
+        self.assertEqual(code, 0, log)
+        files = self.files(d)
+        out = os.path.join(d, "raw", "run00007_built.root")
+        self.assertEqual(eventbuild.built_name(files["run00007_vx2740b.raw"]), out)
+        env = dict(os.environ, PYTHONPATH=str(PROJECT / "src"), OMP_NUM_THREADS="1")
+        p = subprocess.run([sys.executable, "-m", "alab_daq.core.eventbuild", files["run00007_vx2740b.raw"]], env=env,
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        n = status["boards"][0]["events"]
+        self.assertIn(f"check: {n} triggers of vx2730, {n} entries", p.stdout)
+        with uproot.open(out) as r:
+            t = r["events"]
+            a = t.arrays(["trigger_id", "complete", "n_boards", "vx2740a_dt_ns", "vx2730_ch0", "vx2740b_ch3"], library="np")
+            settings = json.loads(str(r["settings"]))
+        self.assertEqual(len(a["trigger_id"]), n)
+        self.assertTrue(a["complete"].all() and (a["n_boards"] == 3).all())
+        self.assertFalse(a["vx2740a_dt_ns"].any())                   # one clock: the same timestamps
+        self.assertEqual((a["vx2730_ch0"].shape[1], a["vx2740b_ch3"].shape[1]), (256, 64))
+        self.assertEqual((settings["format"], settings["reference"], settings["window_ns"]), ("alab-daq-built", "vx2730", 1000))
+        with R.RawFile(files["run00007_vx2740b.raw"]) as f:          # the samples are the board's own
+            self.assertTrue(np.array_equal(a["vx2740b_ch3"][5], f.event(5).waveform(3)))
+
     def test_periodic(self):
         cfg = small(C.default_config())
         cfg.trigger.setup, cfg.trigger.software_rate_hz, cfg.trigger.software_target = "periodic", 20, "chain"

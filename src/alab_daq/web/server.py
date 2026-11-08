@@ -35,6 +35,7 @@ OPEN_PATHS = {"/api/me", "/api/login"}          # reachable when guests are off 
 LOGIN_FAILS_BEFORE_PAUSE = 5
 LOGIN_PAUSE_S = 30
 MAX_CHANNELS_ASKED = 64
+EXPORT_MAX_EVENTS = 1000
 SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; "
                                "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",
@@ -567,6 +568,28 @@ async def root_convert(request):
     return st.converter.status()
 
 
+@api("viewer")
+async def root_build(request):
+    st: Station = request.app["station"]
+    data = await body(request)
+    raw = st.files.check(str(data.get("path", "")))
+    who = request["user"] or "guest"
+    workdir = os.path.join(st.settings.runs_folder(), "users", who.replace("/", "_"), "convert")
+    out = st.converter.request_build(raw, workdir, who)
+    st.activity(request["user"], "asked for the run's events in one ROOT file", out)
+    return {**st.converter.status(), "out": out}
+
+
+@api("viewer")
+async def files_export(request):
+    st: Station = request.app["station"]
+    path = request.query.get("path", "")
+    first, count = int_query(request, "first", 0, 0), int_query(request, "count", 1, 1, EXPORT_MAX_EVENTS)
+    text, name = await asyncio.to_thread(st.files.export_text, path, first, count, channels_query(request))
+    return web.Response(text=text, content_type="text/plain", charset="utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
 @api("operator")
 async def root_cancel(request):
     st: Station = request.app["station"]
@@ -628,6 +651,8 @@ def create_app(station: Station | None = None) -> web.Application:
     r.add_get("/api/files/hk", files_hk)
     r.add_post("/api/root/convert", root_convert)
     r.add_post("/api/root/cancel", root_cancel)
+    r.add_post("/api/root/build", root_build)
+    r.add_get("/api/files/export", files_export)
 
     async def startup(app):
         await app["station"].start()

@@ -494,6 +494,8 @@ class RunManager:
         keep = [p for p in files if os.path.isfile(p) and os.path.getsize(p) > 0]
         if keep and self.station.settings.convert_to_root:
             self.station.converter.add(keep, a.run_dir, run_json=a.path("run.json"), by=a.started_by)
+        if keep and self.station.settings.build_events and len(s.get("boards", [])) > 1:
+            self.station.converter.add_build(keep[0], a.run_dir, run_json=a.path("run.json"), by=a.started_by)
 
     # ---- after a server restart ----
     def load_last(self) -> None:
