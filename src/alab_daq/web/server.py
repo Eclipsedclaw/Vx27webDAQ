@@ -520,6 +520,18 @@ async def files_combined(request):
 
 
 @api("viewer")
+async def live_hk(request):
+    st: Station = request.app["station"]
+    return await asyncio.to_thread(st.runs.live_hk)
+
+
+@api("viewer")
+async def files_hk(request):
+    st: Station = request.app["station"]
+    return await asyncio.to_thread(st.files.hk, request.query.get("path", ""))
+
+
+@api("viewer")
 async def live_boards(request):
     return {"boards": request.app["station"].runs.live_boards()}
 
@@ -597,6 +609,8 @@ def create_app(station: Station | None = None) -> web.Application:
     r.add_get("/api/live/overview", live_overview)
     r.add_get("/api/live/combined", live_combined)
     r.add_get("/api/files/combined", files_combined)
+    r.add_get("/api/live/hk", live_hk)
+    r.add_get("/api/files/hk", files_hk)
     r.add_post("/api/root/convert", root_convert)
     r.add_post("/api/root/cancel", root_cancel)
 

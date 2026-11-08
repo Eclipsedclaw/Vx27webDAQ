@@ -5,6 +5,10 @@ What changed in each version of ALAB DAQ. Write the notes of the next version un
 
 ## Unreleased
 
+## v0.0.5 (2026-11-08)
+
+- Housekeeping, statistics and sync check. Every board's housekeeping (all temperature sensors, fans, DC-DC, ErrorFlags, AcquisitionStatus, TriggerCnt, LostTriggerCnt, real/dead/live time, each channel's SelfTrgRate) every `run.hk_s` seconds into `RUN_BOARD_hk.csv` beside its data and into its ROOT file (TTree `hk`), shown in the new tool **Board housekeeping** (live or for a data file) and by Check boards; warnings for error flags, the board-fail bit of the events and an optional temperature (`run.temp_warn_c`). Statistics per board on the Run page: triggers counted, lost, incoming rate, dead time. The sync check (`daq/sync.py`): with one trigger for all boards, every trigger ID every board has passed is counted as on every board within `run.sync_window_ns`, out of sync, or missing on a board, with each board's timestamp difference from the first; shown on the Run page and summed up in the DAQ output and run.json.
+
 ## v0.0.4 (2026-11-08)
 
 - Channels and combined view. The waveforms show the channels chosen with **Channels…** (at most 16 at a time, each board its own choice, quick choices by 16, read out, in trigger) instead of pages of 8 or 16. A **Combined** view puts channels of several boards in one plot, from one moment: the DAQ program keeps the first event of every timestamp cell (2^25 ticks, 0.27 s) of each board and writes the newest cell all boards share as `live/combined.set`; from files the run's boards are paired by trigger ID (`.raw` and ROOT). Time in µs from each board's trigger or lined up by timestamps, the window of every board; y in mV from the baseline (each model's 2 Vpp input range), ADC from the baseline or raw ADC. Defaults: the configuration file `/NAS/ALAB_DAQ_DATA/alab_daq_test.json` (the lab's setup until it is saved there) and the data folder `/NAS/ALAB_DAQ_DATA/`.

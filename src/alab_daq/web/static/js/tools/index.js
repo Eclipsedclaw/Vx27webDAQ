@@ -8,7 +8,8 @@
 // A new tool: write js/tools/NAME.js, import it here, put it in the list, and add its texts to i18n/zh.json.
 import boards from "./boards.js";
 import datafile from "./datafile.js";
+import hk from "./hk.js";
 import overview from "./overview.js";
 import rootconv from "./rootconv.js";
 
-export const TOOLS = [overview, datafile, boards, rootconv];
+export const TOOLS = [overview, hk, datafile, boards, rootconv];

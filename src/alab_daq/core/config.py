@@ -112,6 +112,9 @@ class RunSettings:
     data_dir: str = DEFAULT_DATA_DIR
     write_raw: bool = True
     file_mb: int = 2048         # a new file when one reaches this size
+    hk_s: float = 5.0           # board housekeeping (temperatures, counters, errors) every this many seconds
+    sync_window_ns: int = 1000  # the sync check: the same trigger ID on two boards within this time is one trigger
+    temp_warn_c: float = 0.0    # a warning when a board's hottest sensor reaches this (°C); 0: no warning
 
 
 @dataclass
@@ -322,6 +325,18 @@ def event_bytes(board: Board) -> int:
     return 24 + 2 * n * board.record_length
 
 
+def common_trigger(cfg: DaqConfig) -> bool:
+    """Every board records every trigger (one trigger for all): then the boards' trigger IDs count alike, and
+    the sync check compares them."""
+    t = cfg.trigger
+    chained = cfg.run.sync == "chain" and len(cfg.active()) > 1
+    if t.setup in ("master", "external", "logic_or"):
+        return True
+    if t.setup == "periodic":
+        return t.software_target == "chain" if t.periodic_source == "software" else chained
+    return False
+
+
 def uses_self_trigger(cfg: DaqConfig) -> bool:
     """Some board triggers on its own channels."""
     return cfg.trigger.setup in ("self", "logic_or", "master")
@@ -510,6 +525,12 @@ def check_config(cfg: DaqConfig, check_paths: bool = True, facts: dict | None = 
         warn("run.duration_s", "the run goes on until someone presses Stop")
     if not 16 <= r.file_mb <= 1 << 20:
         err("run.file_mb", "must be from 16 to 1048576 MB")
+    if not 1 <= r.hk_s <= 3600:
+        err("run.hk_s", "must be from 1 to 3600 s")
+    if not 8 <= r.sync_window_ns <= 10 ** 9:
+        err("run.sync_window_ns", "must be from 8 ns to 1 s")
+    if not 0 <= r.temp_warn_c <= 150:
+        err("run.temp_warn_c", "must be from 0 (no warning) to 150 °C")
     if r.write_raw and check_paths:
         d = os.path.expanduser(r.data_dir)
         if not r.data_dir:

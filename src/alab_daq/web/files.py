@@ -21,7 +21,7 @@ from collections import OrderedDict
 import numpy as np
 
 from alab_daq.core import config as C
-from alab_daq.core import models, rawdata
+from alab_daq.core import models, rawdata, rootconv
 
 DATA_SUFFIXES = (".raw", ".root")
 MAX_BINS = 4000
@@ -195,6 +195,21 @@ def combined_view(entries: list[dict], traces: list[tuple[str, int]], t_lo: floa
     stamps = [b["timestamp"] for b in boards if b["present"]]
     return {"boards": boards, "traces": out, "range_ns": [lo or 0.0, hi or 0.0], "yunit": yunit, "align": align,
             "same_ids": len(ids) == 1, "spread_ns": (max(stamps) - min(stamps)) * rawdata.TIMESTAMP_NS if stamps else None}
+
+
+HK_ROWS = 2000                  # the most readings a housekeeping table sends (every n-th when there are more)
+
+
+def hk_table(path: str, max_rows: int = HK_ROWS) -> dict:
+    """A board's housekeeping file for the page: its columns, thinned to max_rows readings (the last kept)."""
+    cols = rootconv.read_hk(path)
+    n = len(next(iter(cols.values()))) if cols else 0
+    keep = np.unique(np.concatenate([np.arange(0, n, max(1, math.ceil(n / max_rows))), [n - 1]])) if n else np.zeros(0, int)
+    out = {}
+    for k, v in cols.items():
+        x = v[keep]
+        out[k] = [None if not np.isfinite(e) else float(e) for e in x]
+    return {"path": path, "rows": n, "shown": int(len(keep)), "columns": out}
 
 
 def board_lines(cfg: C.DaqConfig | None, board: C.Board | None, status: dict | None = None,
@@ -441,6 +456,15 @@ class DataFiles:
                 "settings": {**f.settings(), **{x: info[x] for x in ("record_length", "pre_trigger", "sample_ns",
                                                                      "adc_max", "model")}},
                 "channels": out, "n_channels": len(info["lines"])}
+
+    def hk(self, path: str) -> dict:
+        """The housekeeping of the board of this data file (its RUN_BOARD_hk.csv beside it)."""
+        f = self.open(path)
+        hk = rootconv.hk_path(f.path, f.header)
+        out = {"board": f.board_header.get("name"), "model": f.board_header.get("model"), "run": f.header.get("run")}
+        if not os.path.isfile(hk):
+            return {**out, "path": hk, "rows": 0, "columns": {}, "missing": True}
+        return {**out, **hk_table(hk)}
 
     def run_files(self, f: OpenFile) -> dict[str, list[OpenFile]]:
         """The files of the same run as f in its folder, one board each (in parts: _001, ...): {board: [files]}."""

@@ -235,6 +235,12 @@ class RunTests(WebTestCase):
         run = await self.run_state()
         last = run["last"]
         self.assertEqual(last["phase"], "finished", last)
+        self.assertEqual(last["matching"], {"applies": False, "why": "each board triggers by itself"})
+        hk = await (await self.client.get("/api/live/hk")).json()
+        self.assertEqual([b["name"] for b in hk["boards"]], ["b0", "b1"])
+        self.assertGreaterEqual(hk["boards"][1]["rows"], 2)                # the start and the end of the run
+        self.assertIn("temp_core", hk["boards"][1]["columns"])
+        self.assertGreater(hk["boards"][0]["monitors"]["temp_core"], 40)
         with open(os.path.join(run_dir, "run.json"), encoding="utf-8") as f:
             summary = json.load(f)
         self.assertEqual((summary["phase"], summary["note"], summary["started_by"]), ("finished", NOTE, "oper1"))
@@ -254,6 +260,8 @@ class RunTests(WebTestCase):
         with open(os.path.join(run_dir, "run.json"), encoding="utf-8") as f:
             self.assertEqual({v["status"] for v in json.load(f)["root_files"].values()}, {"ok"})
         # the data files on the page
+        fh = await (await self.client.get("/api/files/hk", params={"path": files[1]})).json()
+        self.assertEqual((fh["board"], fh["rows"] >= 2), ("b1", True))   # the housekeeping of a data file's board
         info = await (await self.client.get("/api/files/info", params={"path": files[0]})).json()
         self.assertEqual((info["kind"], info["settings"]["board"], info["settings"]["note"]), ("raw", "b0", NOTE))
         w = await (await self.client.get("/api/files/waveforms", params={"path": files[0], "event": 2, "channels": "0,3"})).json()
@@ -506,6 +514,7 @@ class PageTests(WebTestCase):
         used |= {"ok", "failed", "mismatch", "cancelled", "exists"}                                     # conversions
         used |= {"stop record", "time-out", "error"}                                                    # how a board ended
         used |= {"not read out", "no event", "not in this event", "no such board"}                       # combined view
+        used |= {"one board", "each board triggers by itself"}                                            # sync check
         cfg = C.default_config()
         for setup in C.SETUPS:                                          # the reasons in "What this board gets"
             for target in C.SOFTWARE_TARGETS:

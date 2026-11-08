@@ -30,7 +30,7 @@ from alab_daq import __version__
 from alab_daq.core import config as C
 from alab_daq.core import rawdata
 from alab_daq.core.system import disk_free, running_daq
-from alab_daq.web.files import board_lines, channel_view, combined_view, side_json
+from alab_daq.web.files import board_lines, channel_view, combined_view, hk_table, side_json
 from alab_daq.web.settings import PROJECT, write_atomic
 
 KILL_AFTER_S = 15           # Kill is offered when the DAQ has not ended this long after Stop
@@ -416,7 +416,8 @@ class RunManager:
             self._write_side(a, path, end)
         boards = [{k: b.get(k) for k in ("name", "uri", "role", "model", "serial", "fw_version", "events", "bytes",
                                          "first_trigger", "last_trigger", "ended", "record_length", "pre_trigger",
-                                         "sample_ns", "files")} for b in s.get("boards", [])]
+                                         "sample_ns", "files", "hk_file", "stats", "monitors", "error_flags",
+                                         "board_fail")} for b in s.get("boards", [])]
         summary = {"run_folder": a.run_dir, "run_name": a.run_name, "gui_version": __version__, "command": a.command,
                    "note": a.note, "started": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(a.started)),
                    "ended": time.strftime("%Y-%m-%d %H:%M:%S"), "started_by": a.started_by,
@@ -424,7 +425,7 @@ class RunManager:
                    "exit_code": None if code == UNKNOWN_EXIT else code, "phase": phase,
                    "stop_reason": s.get("stop_reason"), "t": s.get("t"), "duration": a.cfg.run.duration_s,
                    "events": s.get("events", 0), "bytes": s.get("bytes", 0), "boards": boards,
-                   "data_files": files, "side_files": [side_json(p) for p in files],
+                   "matching": s.get("matching"), "data_files": files, "side_files": [side_json(p) for p in files],
                    "errors": errors, "warnings": s.get("warnings", [])}
         write_atomic(a.path("run.json"), json.dumps(summary, indent=2) + "\n", private=False)
         try:
@@ -464,6 +465,7 @@ class RunManager:
                      "stop_reason": s.get("stop_reason"), "stopped_by": s.get("stopped_by"),
                      "killed_by": s.get("killed_by"), "exit_code": s.get("exit_code"), "errors": s.get("errors", []),
                      "warnings": s.get("warnings", []), "mbps_series": [], "from_record": True,
+                     "matching": s.get("matching"),
                      "sync": cfg.run.sync, "setup": cfg.trigger.setup}
         self.last_cfg = cfg
 
@@ -496,7 +498,7 @@ class RunManager:
                "phase": phase or s.get("phase", "starting"), "boards": s.get("boards", []), "t": s.get("t", 0),
                "duration": a.cfg.run.duration_s, "max_events": a.cfg.run.max_events, "events": s.get("events", 0),
                "bytes": s.get("bytes", 0), "data_files": files, "write_raw": a.cfg.run.write_raw,
-               "sync": a.cfg.run.sync, "setup": a.cfg.trigger.setup,
+               "sync": a.cfg.run.sync, "setup": a.cfg.trigger.setup, "matching": s.get("matching"),
                "stop_sent_at": a.stop_sent_at, "stopped_by": a.stopped_by, "kill_after_s": KILL_AFTER_S,
                "now": time.time(), "reattached": a.reattached, "errors": (errors or s.get("errors", []))[-5:],
                "warnings": s.get("warnings", [])[-5:], "stop_reason": s.get("stop_reason"),
@@ -579,6 +581,24 @@ class RunManager:
                    available=[{"name": b.name, "channels": len(b.channels), "model": b.model,
                                "enabled": [ch.enabled for ch in b.channels]} for _, b in cfg.active()])
         return out
+
+    def live_hk(self) -> dict:
+        """The housekeeping of every board of the run going (else the last run), from their _hk.csv files."""
+        a = self.active
+        boards = (a.status.get("boards", []) if a else (self.last or {}).get("boards", [])) or []
+        out = []
+        for b in boards:
+            path = b.get("hk_file")
+            entry = {"name": b.get("name"), "model": b.get("model"), "monitors": b.get("monitors") or {},
+                     "stats": b.get("stats") or {}, "error_flags": b.get("error_flags"), "path": path}
+            if path and os.path.isfile(path):
+                try:
+                    entry.update(hk_table(path))
+                except (OSError, ValueError):
+                    pass
+            out.append(entry)
+        run = a.run_name if a else (self.last or {}).get("run_name")
+        return {"source": "live", "running": a is not None, "run": run, "boards": out}
 
     def live_overview(self) -> dict:
         """One row per board of the newest events: per channel baseline, noise and peak."""

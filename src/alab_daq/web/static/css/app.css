@@ -561,3 +561,17 @@ details.explain p { margin: 6px 0 0; font-size: 12.5px; color: var(--text-2); li
 .comb-val { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
 .comb-val b { color: var(--text); font-weight: 600; }
 .comb-time { color: var(--text); font-weight: 600; }
+
+/* ---- the run's statistics and the sync check (Run page) ---- */
+.sync-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12.5px; padding: 2px 2px; }
+.sync-line .led { flex: none; }
+.sync-line > span.small { flex: 1 1 0; min-width: 0; }
+.stat-table td, .stat-table th { white-space: nowrap; }
+.hk-plot { display: block; }
+.hk-plot .wave-plot { min-height: 0; padding: 0; }
+.hk-plot .plot { height: auto; min-height: 260px; }
+.hk-plot .u-legend { font-size: 12px; }
+.hk-values { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 6px; }
+.hk-cell { display: flex; justify-content: space-between; gap: 8px; padding: 6px 10px; border: 1px solid var(--border);
+           border-radius: var(--radius-sm); background: var(--surface-2); font-size: 12.5px; }
+.hk-cell.bad { border-color: var(--critical); background: var(--critical-soft); color: var(--critical-text); }

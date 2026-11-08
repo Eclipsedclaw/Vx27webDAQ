@@ -3,7 +3,7 @@
 // program's output. Everyone sees it live. The dividers can be dragged (kept for this browser).
 import { get, post, put } from "../api.js";
 import { T, t } from "../i18n.js";
-import { LinePlot } from "../plots.js";
+import { LinePlot, fmtTime } from "../plots.js";
 import { basename, chip, clear, confirmDialog, dialog, fail, fmtBytes, fmtCompact, fmtDuration, fmtInt, fmtNum, h, icon,
          setText, splitter, toast, toggle } from "../ui.js";
 import { wavePanel } from "../wavepanel.js";
@@ -88,10 +88,22 @@ export function runPage(root, app) {
       h("th.n", { title: t("The trigger ID of the board's newest event (the boards of a common trigger count alike)") }, t("Trigger ID")),
       h("th.n", { title: t("The hottest of the board's temperature sensors (°C)") }, "°C"))),
     boardRows);
+  const syncLine = h("div.sync-line");
+  const statRows = h("tbody");
+  const statTable = h("table.table.cards-table.stat-table",
+    h("thead", h("tr",
+      h("th", t("Statistics")),
+      h("th.n", { title: t("Triggers the board counted (TriggerCnt), taken or not") }, t("Triggers")),
+      h("th.n", { title: t("Triggers the board could not take (LostTriggerCnt): it was busy, its memory full") }, t("Lost")),
+      h("th.n", { title: t("Incoming trigger rate: the board's trigger count per second (ICR), between the last two readings") }, t("In Hz")),
+      h("th.n", { title: t("Dead time: the part of the time the board could not take a trigger, between the last two readings") }, t("Dead")),
+      h("th.n", { title: t("Sync check: the mean difference of this board's timestamps from the first board's for the same trigger, and the spread (lowest … highest)") }, t("Δt to first")))),
+    statRows);
   const plotBox = h("div.bw-plot");
   const rootBox = h("div.stack", { style: "gap:6px" });
   const progressCard = h("div.card.fill", h("div.card-head", h("h2.card-title", t("Progress")), h("span.card-sub", { id: "check-when" })),
-                         h("div.card-body.stack.side-body", tiles, h("div.table-wrap", boardTable), plotBox, rootBox));
+                         h("div.card-body.stack.side-body", tiles, syncLine, h("div.table-wrap", boardTable),
+                           h("div.table-wrap", statTable), plotBox, rootBox));
   const log = h("div.log", { role: "log", "aria-live": "off" });
   const follow = toggle(t("Follow"), true, (on) => { if (on) log.scrollTop = log.scrollHeight; });
   const logCard = h("div.card.fill", h("div.card-head", h("h2.card-title", t("DAQ output")), h("span.spacer"), follow),
@@ -124,9 +136,14 @@ export function runPage(root, app) {
                                 b.role === "master" ? h("span.chip.accent", { title: t("chain master: its clock and start drive the other boards") }, t("M")) : null)),
                     h("td", h("span.row.nowrap", { style: "gap:6px" }, stateLed, stateText, quiet)), ev, rate, mbps, trig, temp);
       const msgRow = h("tr.msg-row.hidden", msg);
-      return { row, msgRow, checkLed, stateLed, stateText, quiet, ev, rate, mbps, trig, temp, msg, where, name: b.name };
+      const sTrig = h("td.n"), sLost = h("td.n"), sIcr = h("td.n"), sDead = h("td.n"), sOff = h("td.n");
+      const flag = h("span");
+      const statRow = h("tr", h("td", h("div.row.nowrap", { style: "gap:6px" }, h("b", b.name), flag)), sTrig, sLost, sIcr, sDead, sOff);
+      return { row, msgRow, checkLed, stateLed, stateText, quiet, ev, rate, mbps, trig, temp, msg, where, name: b.name,
+               statRow, sTrig, sLost, sIcr, sDead, sOff, flag, role: b.role };
     });
     clear(boardRows, boardEls.map((b) => [b.row, b.msgRow]));
+    clear(statRows, boardEls.map((b) => b.statRow));
     markBoard(waves.board());
     showCheck();
     showRun();
@@ -206,6 +223,7 @@ export function runPage(root, app) {
     noteLine.classList.toggle("hidden", !note);
     // the boards
     const states = shown && shown.boards ? shown.boards : [];
+    const match = shown ? shown.matching : null;
     const lag = active && shown.now ? Math.max(0, Date.now() / 1000 - shown.now) : 0;
     boardEls.forEach((b) => {
       const s = states.find((x) => x.name === b.name);
@@ -228,7 +246,20 @@ export function runPage(root, app) {
       b.msgRow.classList.toggle("hidden", !msg);
       b.row.classList.toggle("error", Boolean(s && s.state === "error"));
       b.row.title = s ? `${b.where} · ${s.serial ? t("serial {s}", { s: s.serial }) + " · " : ""}${fmtBytes(s.bytes)} · ${(s.files || []).map((f) => basename(f.path)).join(", ")}` : b.where;
+      // statistics: the board's own counters, and the sync check
+      const st = (s && s.stats) || {};
+      setText(b.sTrig, st.triggers !== undefined ? fmtInt(st.triggers) : "—");
+      setText(b.sLost, st.lost !== undefined ? fmtInt(st.lost) : "—");
+      b.sLost.classList.toggle("warn-text", Boolean(st.lost));
+      setText(b.sIcr, st.icr_hz !== undefined ? fmtRate(st.icr_hz) : "—");
+      setText(b.sDead, st.dead_frac !== undefined ? `${fmtNum(100 * st.dead_frac, st.dead_frac < 0.1 ? 2 : 1)} %` : "—");
+      const off = match && match.offsets ? match.offsets[b.name] : null;
+      setText(b.sOff, off ? `${fmtSigned(off.mean_ns)} ns` : b.name === (match && match.reference) ? t("first") : "—");
+      b.sOff.title = off ? t("{n} triggers: {lo} … {hi} ns, σ {sd} ns", { n: fmtInt(off.n), lo: fmtSigned(off.min_ns), hi: fmtSigned(off.max_ns), sd: fmtNum(off.std_ns, 1) }) : "";
+      const flags = s && s.error_flags, fail = s && s.board_fail;
+      clear(b.flag, flags ? chip(t("error flags 0x{f}", { f: flags.toString(16) }), "critical", "alert") : fail ? chip(t("board fail"), "critical", "alert") : null);
     });
+    showMatching(match, active);
     // tiles
     const first = states[0];
     const files = shown && shown.data_files ? shown.data_files : [];
@@ -242,6 +273,26 @@ export function runPage(root, app) {
           tile(t("Boards"), shown ? String(states.length) : String(boardEls.length),
                shown ? t(shown.sync === "chain" && states.length > 1 ? "clock chain" : states.length > 1 ? "independent boards" : "one board") : ""));
     plot.setPoints((shown && shown.mbps_series) || []);
+  }
+
+  function fmtSigned(v) { return `${v > 0 ? "+" : v < 0 ? "−" : ""}${fmtNum(Math.abs(v), Math.abs(v) < 10 ? 1 : 0)}`; }
+
+  function showMatching(m, active) {
+    if (!m) { clear(syncLine); syncLine.classList.add("hidden"); return; }
+    syncLine.classList.remove("hidden");
+    if (!m.applies) {
+      clear(syncLine, h("span.text2.small", t("Sync check: not for this setup ({why})", { why: t(m.why || "") })));
+      return;
+    }
+    const miss = Object.entries(m.missing || {}).filter(([, n]) => n);
+    const bad = m.out_of_sync || miss.length;
+    clear(syncLine, h(`span.led${bad ? ".warn" : m.checked ? ".ok" : ""}`),
+          h("span.small", t("Sync check: {n} triggers on every board within {w}", { n: fmtInt(m.built), w: fmtTime(m.window_ns) }),
+            " · ", h(m.out_of_sync ? "b.warn-text" : "span", t("{n} out of sync", { n: fmtInt(m.out_of_sync) })),
+            " · ", miss.length ? h("b.warn-text", t("missing: {list}", { list: miss.map(([n, k]) => `${n} ${fmtInt(k)}`).join(", ") }))
+                               : t("none missing"),
+            active ? h("span.text2", ` · ${t("counted when every board is past a trigger")}`) : null));
+    syncLine.title = t("Every trigger ID that every board has passed: on every board, and the timestamps within the window of the first board's (Configuration: sync window)");
   }
 
   function tile(label, value, note) {

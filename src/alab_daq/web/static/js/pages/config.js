@@ -157,7 +157,13 @@ export function configPage(root, app) {
                t("Off: only the live view; nothing is kept")),
       ...field(t("data folder"), [dataDir, dataPick], t("RUN_BOARD.raw for each board, e.g. run00012_b0.raw (the run number is one more than the highest run in this folder); a NAME.json next to each, and NAME.root after the conversion")),
       ...field(t("file size"), [number(() => r.file_mb, (v) => { r.file_mb = v; }, "run.file_mb", { lo: 16, hi: 1 << 20, width: "110px" }), h("span.text2", "MB")],
-               t("a new file (_001.raw, _002.raw, …) when a file reaches this size")));
+               t("a new file (_001.raw, _002.raw, …) when a file reaches this size")),
+      ...field(t("housekeeping"), [h("span.text2", t("every")), number(() => r.hk_s, (v) => { r.hk_s = v; }, "run.hk_s", { lo: 1, hi: 3600, step: 1, float: true, width: "90px" }), h("span.text2", t("s"))],
+               t("each board's temperatures, fans, DC-DC, error flags, trigger and lost-trigger counters and dead time, into RUN_BOARD_hk.csv beside its data (and into its ROOT file); Tools: Board housekeeping")),
+      ...field(t("temperature warning"), [number(() => r.temp_warn_c, (v) => { r.temp_warn_c = v; }, "run.temp_warn_c", { lo: 0, hi: 150, step: 1, float: true, width: "90px" }), h("span.text2", "°C")],
+               t("a warning in the DAQ output when a board's hottest sensor reaches this; 0: none (the board protects itself from overheating: it stops and needs a reset)")),
+      ...field(t("sync window"), [number(() => r.sync_window_ns, (v) => { r.sync_window_ns = v; }, "run.sync_window_ns", { lo: 8, hi: 1e9, step: 8, width: "110px" }), h("span.text2", "ns")],
+               t("the sync check (one trigger for all boards): the same trigger ID on two boards counts as one trigger when the timestamps are this close")));
     const runCard = h("div.card", h("div.card-head", h("h2.card-title", t("Run"))), h("div.card-body", runGrid));
 
     // the trigger

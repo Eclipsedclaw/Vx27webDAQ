@@ -14,6 +14,9 @@ Branches of "events":
     ch0, ch1, ...       UShort_t[n_samples]   the samples of each channel read out (raw ADC counts)
 Two TObjString go with the tree: "settings" (the file's header: the board, its model and serial, every
 parameter as it was set, the run's whole configuration) and "note" (the run's note).
+A second TTree "hk" holds the board's housekeeping when its RUN_BOARD_hk.csv is next to the file: one entry
+per reading, a Double_t branch per column (time in Unix seconds, run_s, the temperatures in °C, the counters,
+error_flags, ...; an empty cell is NaN).
 Read in PyROOT: f = ROOT.TFile("NAME.root"); t = f.events; t.GetEntry(0); list(t.ch0)
 
 The conversion prints "processed N %" lines, then reads the ROOT file back and prints
@@ -43,6 +46,29 @@ def side_note(raw_path: str, header: dict) -> str:
     except (OSError, ValueError, AttributeError):
         pass
     return str(header.get("note") or "")
+
+
+def hk_path(raw_path: str, header: dict) -> str:
+    """The board's housekeeping file of this data file (one per board and run, beside the first data file)."""
+    board = (header.get("board") or {}).get("name", "")
+    return os.path.join(os.path.dirname(raw_path), f"{header.get('run', '')}_{board}_hk.csv")
+
+
+def read_hk(path: str) -> dict[str, np.ndarray]:
+    """A housekeeping file as columns of float64 (an empty or non-numeric cell: NaN)."""
+    with open(path, encoding="utf-8") as f:
+        names = f.readline().strip().split(",")
+        rows = [line.rstrip("\n").split(",") for line in f if line.strip()]
+    cols = {}
+    for j, name in enumerate(names):
+        vals = []
+        for r in rows:
+            try:
+                vals.append(float(int(r[j], 0)) if r[j].startswith("0x") else float(r[j]))
+            except (IndexError, ValueError):
+                vals.append(float("nan"))
+        cols[name] = np.asarray(vals, dtype=np.float64)
+    return cols
 
 
 def _popcount(x: np.ndarray) -> np.ndarray:
@@ -93,6 +119,11 @@ def convert(raw_path: str, out_path: str, report=None) -> int:
                 tree.extend(data)
                 done += m
                 report(100.0 * done / n)
+            hk = hk_path(raw_path, f.header)
+            if int(f.header.get("file_index") or 0) == 0 and os.path.isfile(hk):
+                cols = read_hk(hk)
+                if cols and len(next(iter(cols.values()))):
+                    out.mktree("hk", {k: np.float64 for k in cols}, title=f"{title}: housekeeping").extend(cols)
         finally:
             out.close()
     return n

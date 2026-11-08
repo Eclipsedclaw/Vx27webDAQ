@@ -22,7 +22,7 @@ import time
 
 def check(args) -> int:
     from alab_daq.core import config as C
-    from alab_daq.daq.boards import BoardError, monitors, open_board
+    from alab_daq.daq.boards import BoardError, housekeeping, open_board
     try:
         cfg, _ = C.load_config(args.config)
     except (OSError, C.ConfigError) as err:
@@ -41,7 +41,7 @@ def check(args) -> int:
         try:
             board = open_board(b.uri, crate, b.name)
             out["facts"] = board.identify()
-            out["monitors"] = monitors(board)
+            out["monitors"] = housekeeping(board)
             out["ok"] = True
             if args.trees:
                 tree = board.device_tree()

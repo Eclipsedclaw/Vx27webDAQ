@@ -23,6 +23,21 @@ MONITORS = {"temp_air_in": "/par/TempSensAirIn", "temp_air_out": "/par/TempSensA
             "acq_status": "/par/AcquisitionStatus"}
 
 
+# Housekeeping: what a board says about itself, read every few seconds during a run (engine.py) and by Check boards.
+# Board parameters of the Digitizer 2.0 (CAEN FELib, the Scope firmware); a board that lacks one simply leaves it out.
+HK = {"temp_air_in": "/par/TempSensAirIn", "temp_air_out": "/par/TempSensAirOut", "temp_core": "/par/TempSensCore",
+      "temp_first_adc": "/par/TempSensFirstADC", "temp_last_adc": "/par/TempSensLastADC",
+      "temp_hottest_adc": "/par/TempSensHottestADC", "temp_dcdc": "/par/TempSensDCDC",
+      "fan1_speed": "/par/SpeedSensFan1", "fan2_speed": "/par/SpeedSensFan2",
+      "dcdc_vin": "/par/VInSensDCDC", "dcdc_vout": "/par/VOutSensDCDC", "dcdc_iout": "/par/IOutSensDCDC",
+      "dcdc_duty": "/par/DutyCycleSensDCDC", "core_freq": "/par/FreqSensCore",
+      "error_flags": "/par/ErrorFlags", "acq_status": "/par/AcquisitionStatus",
+      "trigger_cnt": "/par/TriggerCnt", "lost_trigger_cnt": "/par/LostTriggerCnt",
+      "realtime": "/par/RealtimeMonitor", "deadtime": "/par/DeadtimeMonitor", "livetime": "/par/LivetimeMonitor"}
+HK_INTS = ("error_flags", "acq_status", "trigger_cnt", "lost_trigger_cnt", "realtime", "deadtime", "livetime")
+CH_RATE = "/ch/{c}/par/SelfTrgRate"      # a channel's self-trigger rate (Hz)
+
+
 class BoardError(RuntimeError):
     """A board that cannot be reached, or refuses a parameter or a command."""
 
@@ -47,6 +62,49 @@ def identify(board) -> dict:
                 continue
         else:
             out[key] = value.strip()
+    return out
+
+
+def number(value: str):
+    """A parameter's text as a number: an int for whole numbers and masks (0x...), else a float; else the text."""
+    text = str(value).strip()
+    try:
+        return int(text, 0)
+    except ValueError:
+        pass
+    try:
+        x = float(text)
+    except ValueError:
+        return text
+    return int(x) if x.is_integer() and abs(x) < 1 << 53 and "." not in text else x
+
+
+def housekeeping(board, wanted: dict | None = None) -> dict:
+    """The board's sensors, counters and error flags (HK); the keys it does not know are dropped from wanted."""
+    wanted = dict(HK) if wanted is None else wanted
+    out = {}
+    for key, path in list(wanted.items()):
+        try:
+            out[key] = number(board.get(path))
+        except BoardError:
+            wanted.pop(key, None)
+    return out
+
+
+def channel_rates(board, channels: list[int], state: dict) -> dict:
+    """{channel: self-trigger rate (Hz)} of these channels; state[\"off\"] after the first refusal (the board's
+    firmware has no such counter): later calls ask nothing."""
+    out = {}
+    if state.get("off"):
+        return out
+    for c in channels:
+        try:
+            v = number(board.get(CH_RATE.format(c=c)))
+        except BoardError:
+            state["off"] = True
+            return {}
+        if isinstance(v, (int, float)):
+            out[c] = v
     return out
 
 

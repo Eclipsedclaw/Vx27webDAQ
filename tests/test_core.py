@@ -263,6 +263,30 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual((m.channels, m.adc_max, m.sample_ns), (32, 16383, 2.0))
 
 
+class SyncCheckTests(unittest.TestCase):
+    def test_counts(self):
+        from alab_daq.daq.sync import SyncCheck
+        ids = np.arange(100, dtype=np.int64)
+        s = SyncCheck(["m", "a", "b"], 1000)
+        a_ids = np.delete(ids, 50)                              # a lacks trigger 50
+        a_ts = a_ids * 1000
+        a_ts[a_ids == 60] += 500                               # and its trigger 60 is 4 µs late
+        s.add(0, ids[:40], ids[:40] * 1000)
+        s.add(1, a_ids[:30], a_ts[:30])
+        s.add(2, ids, ids * 1000 + 3)                          # b: always 3 ticks (24 ns) later: the cabling
+        s.process()
+        self.assertEqual(s.checked, 30)                        # only the IDs every board has passed
+        s.add(0, ids[40:], ids[40:] * 1000)
+        s.add(1, a_ids[30:], a_ts[30:])
+        s.process(final=True)
+        v = s.view()
+        self.assertEqual((v["checked"], v["built"], v["out_of_sync"]), (100, 98, 1))
+        self.assertEqual(v["missing"], {"m": 0, "a": 1, "b": 0})
+        self.assertEqual(v["offsets"]["b"]["mean_ns"], 24.0)
+        self.assertEqual(v["first_bad"]["trigger_id"], 60)
+        self.assertIn("missing: a 1", s.summary())
+
+
 def run_daq(name: str, cfg: C.DaqConfig, options: str = "--rate 40 --seed 5", note: str = "", stop_after=None,
             timeout=60) -> tuple[int, str, dict, str]:
     """One run of the DAQ program with simulated boards, in a folder of its own: (exit code, log, status, folder)."""
@@ -414,6 +438,47 @@ class DaqRunTests(unittest.TestCase):
                                                     "model": "V2740", "adc_max": 65535}, "ev": ev, "enabled": [True, True]}],
                             [("x", 1)], None, None, 100, "adc", "trigger")
         self.assertEqual(one["traces"][0]["y"], [0.0] * 8)
+
+    def test_housekeeping_and_sync(self):
+        """Housekeeping every second into RUN_BOARD_hk.csv (and the ROOT file), the error-flag warning, and the
+        sync check of the master trigger: every trigger on every board, at the same timestamp."""
+        from alab_daq.core import rootconv
+        cfg = small(C.lab_setup(), seconds=3)
+        cfg.run.hk_s = 1
+        code, log, status, d = run_daq("hk_sync", cfg, options="--rate 30 --seed 4 --fail errflags:vx2740a:1")
+        self.assertEqual(code, 0, log)
+        self.assertIn("vx2740a: the board reports error flags 0x800", log)
+        m = status["matching"]
+        self.assertTrue(m["applies"])
+        self.assertGreater(m["built"], 20)
+        self.assertEqual((m["out_of_sync"], set(m["missing"].values())), (0, {0}))
+        self.assertEqual(m["built"], m["checked"])
+        self.assertEqual({k: v["mean_ns"] for k, v in m["offsets"].items()}, {"vx2740a": 0.0, "vx2740b": 0.0})
+        self.assertIn("sync check:", log)
+        for b in status["boards"]:
+            path = b["hk_file"]
+            self.assertEqual(os.path.basename(path), f"run00007_{b['name']}_hk.csv")
+            self.assertEqual(os.path.dirname(path), cfg.run.data_dir)       # next to the data
+            cols = rootconv.read_hk(path)
+            self.assertGreaterEqual(len(cols["time"]), 3)
+            for k in ("temp_core", "temp_hottest_adc", "error_flags", "trigger_cnt", "lost_trigger_cnt", "dead_frac", "ch0_trg_rate"):
+                self.assertIn(k, cols)
+            self.assertEqual(int(cols["trigger_cnt"][-1]), b["events"])          # the last reading: after the stop
+            self.assertEqual(b["stats"]["triggers"], b["events"])
+            self.assertGreater(b["monitors"]["temp_core"], 50)
+        self.assertEqual(int(rootconv.read_hk(status["boards"][1]["hk_file"])["error_flags"][-1]), 0x800)
+        raw = self.files(d)["run00007_vx2730.raw"]
+        rootconv.convert(raw, raw[:-4] + ".root")
+        import uproot
+        with uproot.open(raw[:-4] + ".root") as r:
+            self.assertEqual(r["hk"].num_entries, len(rootconv.read_hk(status["boards"][0]["hk_file"])["time"]))
+            self.assertIn("temp_core", r["hk"].keys())
+        # each board triggering by itself: no sync check
+        cfg = small(C.default_config())
+        cfg.trigger.setup = "self"
+        code, log, status, d = run_daq("hk_self", cfg)
+        self.assertEqual(code, 0, log)
+        self.assertEqual(status["matching"], {"applies": False, "why": "each board triggers by itself"})
 
     def test_periodic(self):
         cfg = small(C.default_config())

@@ -6,11 +6,14 @@ restarts:
 
 RUN_FOLDER/config.json is the run's configuration (written by the server: the configuration, its note, the
 run's name). The program prints its log (the server keeps it as daq.log) and writes into RUN_FOLDER:
-    status.json      twice a second: the phase, and each board's state, counters and files
+    status.json      twice a second: the phase, each board's state, counters, files, housekeeping and statistics,
+                     and the sync check (sync.py)
     live/NAME.evt    the newest event of each board, as the board sent it (the page's live waveforms)
     live/combined.set  one event of every board from the same moment (the page's combined view; write_set)
 and the data, one stream per board, as the board sent it: DATA_FOLDER/RUN_NAME_BOARD.raw (and _001.raw ...
-when a file reaches file_mb). See core/rawdata.py.
+when a file reaches file_mb). See core/rawdata.py. Every board's housekeeping (temperatures, fans, DC-DC, error
+flags, trigger and lost-trigger counters, dead time; boards.HK) every run.hk_s seconds goes into
+DATA_FOLDER/RUN_NAME_BOARD_hk.csv (RUN_FOLDER/hk/ when no data are kept).
 
 A run, in this order (CAEN's sync demo, caen-dig2 demo/caen-felib-demo-sync): connect to every board, one after
 the other, and check its firmware (Scope) and model; reset it and set its parameters (core/config.py: plan);
@@ -38,18 +41,28 @@ import numpy as np
 from alab_daq import __version__
 from alab_daq.core import config as C
 from alab_daq.core import models, rawdata
-from alab_daq.daq.boards import BoardError, monitors, open_board
+from alab_daq.daq.boards import HK, BoardError, channel_rates, housekeeping, open_board
+from alab_daq.daq.sync import SyncCheck
 
 STOP_WAIT_S = 10.0          # after the stop command: how long a board may take to send its stop record
 STATUS_S = 0.5
 LIVE_S = 0.25               # the newest event of a board is written at most this often
-MONITOR_S = 10.0            # temperatures and the acquisition status
+SYNC_S = 0.5                # how often the sync check counts the triggers every board has passed
+STAT_KEYS = ("events", "icr_hz", "rate_hz", "dead_frac")      # derived columns of the housekeeping file
 SILENT_WARN_S = 5.0         # a board without any data this long after the start gets a warning
 RATE_WINDOW_S = 10.0
 GRID_SHIFT = 25             # timestamp cells of 2**25 ticks (0.27 s): each board keeps the first event of each
 GRID_KEEP = 16             # cells kept per board
 SET_S = 0.3                # how often the matched set is written (when there is a newer one)
 TS_MASK = (1 << 48) - 1
+
+
+def _cell(v) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, float):
+        return f"{v:.6g}"
+    return str(v).replace(",", ";")
 
 
 def stamp() -> str:
@@ -89,8 +102,22 @@ class BoardRun:
         self.cell = None            # the newest timestamp cell seen (pick_cells)
         self.picks: deque = deque(maxlen=GRID_KEEP)     # (cell, trigger ID, timestamp, event bytes)
         self.history: deque = deque()       # (time, events, bytes), for the recent rates
-        self.monitors: dict = {}
-        self.wanted_monitors = None
+        self.monitors: dict = {}            # the newest housekeeping values (boards.HK)
+        self.hk_wanted: dict | None = None
+        self.hk_prev: dict | None = None
+        self.stats: dict = {}               # from the counters: icr_hz, rate_hz, dead_frac, triggers, lost
+        self.ch_rates: dict = {}            # channel -> self-trigger rate (Hz)
+        self.rates_state: dict = {}
+        self.hk_file: str | None = None
+        self.hk_out = None
+        self.hk_cols: list | None = None
+        self.hk_rows = 0
+        self.error_flags = 0
+        self.temp_warned = False
+        self.board_fail = False
+        self.sync_q: deque = deque()        # (trigger IDs made continuous, timestamps) per buffer, for sync.py
+        self.id_last_raw = None
+        self.id_base = 0
         self.applied: list = []     # [path, value] as set
         self.record_length = cfg_board.record_length
         self.pre_trigger = cfg_board.pre_trigger
@@ -125,6 +152,8 @@ class BoardRun:
                 "first_trigger": self.first_trigger, "last_trigger": self.last_trigger,
                 "last_timestamp": self.last_timestamp, "start_record": self.start_record,
                 "stop_record": self.stop_record, "ended": self.ended, "files": files, "monitors": self.monitors,
+                "stats": self.stats, "ch_rates": {str(c): v for c, v in self.ch_rates.items()}, "hk_file": self.hk_file,
+                "error_flags": self.error_flags, "board_fail": self.board_fail,
                 "age": None if self.last_data is None else now - self.last_data}
 
 
@@ -156,6 +185,8 @@ class Run:
         self.status_path = os.path.join(self.run_dir, "status.json")
         self._last_status = 0.0
         self.set_cell = None            # the cell of the last live/combined.set
+        self.sync = (SyncCheck([b.name for b in self.boards], self.cfg.run.sync_window_ns)
+                     if len(self.boards) > 1 and C.common_trigger(self.cfg) else None)
 
     # ---- output ----
     def log(self, text: str, level: str = "") -> None:
@@ -177,6 +208,8 @@ class Run:
                 "simulator": self.simulate is not None, "started": self.t_start, "t": t,
                 "duration": self.cfg.run.duration_s, "max_events": self.cfg.run.max_events,
                 "sync": self.cfg.run.sync, "setup": self.cfg.trigger.setup, "boards": boards,
+                "matching": self.sync.view() if self.sync else {"applies": False, "why": "one board" if len(self.boards) < 2
+                                                                else "each board triggers by itself"},
                 "events": sum(b["events"] for b in boards), "bytes": sum(b["bytes"] for b in boards),
                 "stop_reason": self.stop_reason, "stop_requested": self.stop_requested,
                 "errors": self.errors[-20:], "warnings": self.warnings[-20:], "time": time.time()}
@@ -437,7 +470,16 @@ class Run:
                         size = (w1 & 0xFFFFFFFF) * rawdata.WORD
                         self.write_live(br, bytes(data[sc.last_scope:sc.last_scope + size]))
                 if offs:
-                    self.pick_cells(br, data, offs)
+                    words = np.frombuffer(data, dtype=">u8", count=len(data) // rawdata.WORD)
+                    idx = np.asarray(offs, dtype=np.int64) // rawdata.WORD
+                    w1, w2 = words[idx], words[idx + 1]
+                    self.pick_cells(br, data, offs, w1, w2)
+                    if self.sync is not None:
+                        self.sync_push(br, w1, w2)
+                    if not br.board_fail and np.any((w1 >> np.uint64(56)) & np.uint64(1)):
+                        br.board_fail = True
+                        self.log(f"{br.name}: its events carry the board-fail flag: the board reports a failure "
+                                 "(a lost clock, an overheated part); see its housekeeping", "warning")
                 for _, sp in sc.specials:
                     if sp["kind"] == "start":
                         br.start_record = sp
@@ -464,24 +506,123 @@ class Run:
         except OSError:
             pass
 
-    def pick_cells(self, br: BoardRun, data, offs: list) -> None:
+    def pick_cells(self, br: BoardRun, data, offs: list, w1: np.ndarray, w2: np.ndarray) -> None:
         """Keep the first event of every new timestamp cell (2**GRID_SHIFT ticks). Boards that share the clock
         (a clock chain) and the trigger keep the same triggers, so write_set can show one moment on all."""
-        (w2,) = struct.unpack_from(">Q", data, offs[-1] + rawdata.WORD)
-        if br.cell is not None and (w2 & TS_MASK) >> GRID_SHIFT == br.cell:
-            return                              # no new cell in this buffer: the usual case, and cheap
-        words = np.frombuffer(data, dtype=">u8", count=len(data) // rawdata.WORD)
-        idx = np.asarray(offs, dtype=np.int64) // rawdata.WORD
-        cells = ((words[idx + 1] & np.uint64(TS_MASK)) >> np.uint64(GRID_SHIFT)).astype(np.int64)
+        cells = ((w2 & np.uint64(TS_MASK)) >> np.uint64(GRID_SHIFT)).astype(np.int64)
+        if br.cell is not None and cells[-1] == br.cell:
+            return                              # no new cell in this buffer: the usual case
         before = np.concatenate(([-1 if br.cell is None else br.cell], cells[:-1]))
         for i in np.nonzero(cells > before)[0][-GRID_KEEP:]:
             o = offs[int(i)]
-            w1 = int(words[idx[i]])
-            size = (w1 & 0xFFFFFFFF) * rawdata.WORD
-            pick = (int(cells[i]), (w1 >> 32) & 0xFFFFFF, int(words[idx[i] + 1]) & TS_MASK, bytes(data[o:o + size]))
+            a = int(w1[i])
+            size = (a & 0xFFFFFFFF) * rawdata.WORD
+            pick = (int(cells[i]), (a >> 32) & 0xFFFFFF, int(w2[i]) & TS_MASK, bytes(data[o:o + size]))
             with br.lock:
                 br.picks.append(pick)
         br.cell = max(int(cells[-1]), br.cell if br.cell is not None else -1)
+
+    def sync_push(self, br: BoardRun, w1: np.ndarray, w2: np.ndarray) -> None:
+        """Hand this buffer's trigger IDs (continuous over the 24-bit wrap) and timestamps to the sync check."""
+        raw = ((w1 >> np.uint64(32)) & np.uint64(0xFFFFFF)).astype(np.int64)
+        prev = raw[0] if br.id_last_raw is None else br.id_last_raw
+        wraps = np.cumsum(np.diff(np.concatenate(([prev], raw))) < -(1 << 23))
+        ids = raw + ((br.id_base + wraps) << 24)
+        br.id_base += int(wraps[-1])
+        br.id_last_raw = int(raw[-1])
+        with br.lock:
+            br.sync_q.append((ids, (w2 & np.uint64(TS_MASK)).astype(np.int64)))
+
+    def check_sync(self, final: bool = False) -> None:
+        if self.sync is None:
+            return
+        for k, b in enumerate(self.boards):
+            with b.lock:
+                items, b.sync_q = list(b.sync_q), deque()
+            for ids, ts in items:
+                self.sync.add(k, ids, ts)
+        before = self.sync.out_of_sync
+        self.sync.process(final)
+        if before == 0 and self.sync.out_of_sync and self.sync.first_bad:
+            fb = self.sync.first_bad
+            self.log(f"sync check: trigger ID {fb['trigger_id']} has timestamps "
+                     + ", ".join(f"{n} {ts}" for n, ts in fb["timestamps"].items())
+                     + f" (8 ns ticks): more than {self.cfg.run.sync_window_ns} ns apart", "warning")
+
+    # ---- housekeeping ----
+    def sample_hk(self, b: BoardRun, now: float) -> None:
+        """The board's housekeeping: into b.monitors and b.stats (status.json), and a row of its _hk.csv."""
+        if b.board is None:
+            return
+        if b.hk_wanted is None:
+            b.hk_wanted = dict(HK)
+        vals = housekeeping(b.board, b.hk_wanted)
+        b.ch_rates = channel_rates(b.board, [c for c, ch in enumerate(b.cfg.channels) if ch.enabled], b.rates_state)
+        run_s = 0.0 if self.mono_start is None else now - self.mono_start
+        stats = {"events": b.events}
+        p = b.hk_prev
+        if p is not None and run_s > p["run_s"]:
+            dt = run_s - p["run_s"]
+            stats["rate_hz"] = (b.events - p["events"]) / dt
+            if isinstance(vals.get("trigger_cnt"), int) and isinstance(p.get("trigger_cnt"), int):
+                stats["icr_hz"] = max(0, vals["trigger_cnt"] - p["trigger_cnt"]) / dt
+            if all(isinstance(x, int) for x in (vals.get("realtime"), vals.get("deadtime"), p.get("realtime"), p.get("deadtime"))):
+                real = vals["realtime"] - p["realtime"]
+                if real > 0:
+                    stats["dead_frac"] = min(1.0, max(0.0, (vals["deadtime"] - p["deadtime"]) / real))
+        if isinstance(vals.get("trigger_cnt"), int):
+            stats["triggers"] = vals["trigger_cnt"]
+        if isinstance(vals.get("lost_trigger_cnt"), int):
+            stats["lost"] = vals["lost_trigger_cnt"]
+        b.hk_prev = dict(vals, run_s=run_s, events=b.events)
+        b.monitors, b.stats = vals, stats
+        self.write_hk(b, run_s, vals, stats)
+        self.check_alarms(b, vals)
+
+    def write_hk(self, b: BoardRun, run_s: float, vals: dict, stats: dict) -> None:
+        if b.hk_out is None:
+            if self.cfg.run.write_raw:
+                folder = os.path.expanduser(self.cfg.run.data_dir)
+            else:
+                folder = os.path.join(self.run_dir, "hk")
+            try:
+                os.makedirs(folder, exist_ok=True)
+                b.hk_file = os.path.join(folder, f"{self.run_name}_{b.name}_hk.csv")
+                b.hk_out = open(b.hk_file, "x", encoding="utf-8")
+            except OSError as err:
+                self.log(f"{b.name}: cannot write its housekeeping file: {err}", "warning")
+                b.hk_file, b.hk_out = None, False
+                return
+            b.hk_cols = list(vals) + [f"ch{c}_trg_rate" for c in sorted(b.ch_rates)]
+            b.hk_out.write(",".join(["time", "run_s"] + b.hk_cols + list(STAT_KEYS)) + "\n")
+        if not b.hk_out:
+            return
+        row = {**vals, **{f"ch{c}_trg_rate": v for c, v in b.ch_rates.items()}}
+        cells = [f"{time.time():.3f}", f"{run_s:.3f}"] + [_cell(row.get(k)) for k in b.hk_cols] + [_cell(stats.get(k)) for k in STAT_KEYS]
+        b.hk_out.write(",".join(cells) + "\n")
+        b.hk_out.flush()
+        b.hk_rows += 1
+
+    def check_alarms(self, b: BoardRun, vals: dict) -> None:
+        flags = vals.get("error_flags")
+        if isinstance(flags, int) and flags != b.error_flags:
+            if flags:
+                self.log(f"{b.name}: the board reports error flags 0x{flags:x} (ErrorFlags: e.g. an overheated part or a "
+                         "PLL that lost its lock; the board's web page or CAEN's manual names each bit)", "warning")
+                b.message = f"error flags 0x{flags:x}"
+            else:
+                self.log(f"{b.name}: its error flags are clear again")
+                b.message = ""
+            b.error_flags = flags
+        limit = self.cfg.run.temp_warn_c
+        temps = [v for k, v in vals.items() if k.startswith("temp") and isinstance(v, (int, float))]
+        if limit > 0 and temps:
+            hot = max(temps)
+            if hot >= limit and not b.temp_warned:
+                b.temp_warned = True
+                self.log(f"{b.name}: {hot:.1f} °C, at or above the warning of {limit:g} °C: check its cooling", "warning")
+            elif hot < limit - 2:
+                b.temp_warned = False
 
     def write_set(self) -> None:
         """live/combined.set: the newest cell that every board kept, one event of each (rawdata.pack_set)."""
@@ -510,7 +651,8 @@ class Run:
         targets = C.software_targets(cfg)
         period = 1.0 / cfg.trigger.software_rate_hz if targets else None
         next_sw = time.monotonic() + (period or 0)
-        next_monitor = next_set = 0.0
+        next_hk = next_set = next_sync = 0.0
+        hk_every = max(1.0, float(cfg.run.hk_s))
         while not self.stop_reason:
             now = time.monotonic()
             if self.stop_requested:
@@ -534,13 +676,13 @@ class Run:
                 next_sw += period
                 if now - next_sw > 1.0:             # far behind (a slow moment): do not send a burst
                     next_sw = now + period
-            if now >= next_monitor:
-                next_monitor = now + MONITOR_S
+            if now >= next_hk:
+                next_hk = now + hk_every
                 for b in self.boards:
-                    if b.wanted_monitors is None:
-                        from alab_daq.daq.boards import MONITORS
-                        b.wanted_monitors = dict(MONITORS)
-                    b.monitors = monitors(b.board, b.wanted_monitors)
+                    self.sample_hk(b, now)
+            if now >= next_sync:
+                next_sync = now + SYNC_S
+                self.check_sync()
             if now >= next_set:
                 next_set = now + SET_S
                 self.write_set()
@@ -572,6 +714,11 @@ class Run:
                 b.thread.join(0.2)
                 self.status()
         self.write_set()                        # the last moment all boards have
+        for b in self.boards:                   # the counters at the end
+            self.sample_hk(b, time.monotonic())
+        if self.sync is not None:
+            self.check_sync(final=True)
+            self.log(self.sync.summary(), "warning" if self.sync.out_of_sync or any(self.sync.missing) else "")
         for b in self.boards:
             if b.ended == "time-out" and b.bytes == 0:
                 self.log(f"{b.name} sent no data in this run: it did not start. Was it armed, and (in a chain) is its "
@@ -590,11 +737,15 @@ class Run:
                 b.board.close()
             if b.writer is not None:
                 b.writer.close()
+            if b.hk_out:
+                b.hk_out.close()
 
     def summary(self) -> None:
         for b in self.boards:
             files = ", ".join(os.path.basename(p) for p in (b.writer.files if b.writer else [])) or "none"
             ids = "" if b.first_trigger is None else f", trigger IDs {b.first_trigger}-{b.last_trigger}"
+            if "lost" in b.stats:
+                ids += f", {b.stats['lost']} triggers lost (the board's count)"
             self.log(f"{b.name}: {b.events} events, {b.bytes / 1e6:.2f} MB{ids}, ended: {b.ended or 'not started'}; "
                      f"files: {files}")
         ok = not self.errors and self.boards and all(b.ended == "stop record" for b in self.boards)

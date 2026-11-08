@@ -16,7 +16,10 @@ channels whose pulse passes their threshold) is met.
 
 Options (a string, as on the Settings page): --rate HZ (20), --share P (0.5), --amplitude COUNTS (600),
 --noise SIGMA (3), --seed N, and failures for the tests: --fail open:NAME, param:NAME:PARAM, read:NAME:N,
-nostop:NAME, unarmed:NAME (the board does not take the arm command).
+nostop:NAME, unarmed:NAME (the board does not take the arm command), errflags:NAME:S (ErrorFlags 0x800 from S
+seconds into the run on).
+Housekeeping: the temperatures rise slowly while the board runs; TriggerCnt counts its triggers, the dead time is
+1 µs per event, a channel's SelfTrgRate is the rate of hits on it.
 """
 
 from __future__ import annotations
@@ -134,7 +137,12 @@ def board_params(m: models.Model) -> dict:
         "cupver": (None, "2024100301"), "numch": (None, str(m.channels)), "adc_nbit": (None, str(m.adc_bits)),
         "adc_samplrate": (None, f"{m.msps:g}"), "tempsensairin": (None, "31.5"), "tempsensairout": (None, "36.0"),
         "tempsenscore": (None, "52.3"), "tempsensfirstadc": (None, "44.1"), "tempsenslastadc": (None, "46.8"),
-        "tempsensdcdc": (None, "39.0"), "acquisitionstatus": (None, "0"),
+        "tempsensdcdc": (None, "39.0"), "acquisitionstatus": (None, "0"), "tempsenshottestadc": (None, "47.5"),
+        "speedsensfan1": (None, "3600"), "speedsensfan2": (None, "3540"), "vinsensdcdc": (None, "12.08"),
+        "voutsensdcdc": (None, "1.00"), "ioutsensdcdc": (None, "8.20"), "dutycyclesensdcdc": (None, "41.0"),
+        "freqsenscore": (None, "300"), "errorflags": (None, "0"), "triggercnt": (None, "0"),
+        "losttriggercnt": (None, "0"), "realtimemonitor": (None, "0"), "deadtimemonitor": (None, "0"),
+        "livetimemonitor": (None, "0"),
         "modelname": (None, ""), "serialnum": (None, ""), "formfactor": (None, "VME64X"),
     }
     if m.decimation:
@@ -148,7 +156,7 @@ def channel_params(m: models.Model) -> dict:
          "triggerthr": (_int(-adc_max, adc_max), "100"),
          "triggerthrmode": (_choice(("Relative", "Absolute")), "Relative"),
          "selftriggeredge": (_choice(("Rise", "Fall")), "Fall"), "samplesoverthreshold": (_int(0, 1 << 16), "0"),
-         "itlconnect": (_choice(("Disabled", "ITLA", "ITLB")), "Disabled"),
+         "itlconnect": (_choice(("Disabled", "ITLA", "ITLB")), "Disabled"), "selftrgrate": (None, "0"),
          "wavedatasource": (_choice(("ADC_DATA", "ADC_TEST_TOGGLE", "ADC_TEST_RAMP", "ADC_TEST_SIN",
                                      "ADC_TEST_PRBS", "IPE", "Ramp", "SquareWave")), "ADC_DATA")}
     if m.gain:
@@ -288,6 +296,7 @@ class SimBoard:
         self.read_fail = next((int(f[2]) for f in crate.fails if f[0] == "read" and f[1] == name and len(f) > 2), None)
         self.no_stop = crate.failing("nostop", name) is not None
         self.no_arm = crate.failing("unarmed", name) is not None
+        self.err_after = next((float(f[2]) for f in crate.fails if f[0] == "errflags" and f[1] == name and len(f) > 2), None)
         self.reads = 0
         self.reset()
 
@@ -334,6 +343,9 @@ class SimBoard:
         if kind == "ch":
             if name not in self.cp:
                 raise BoardError(f"{path}: not found")
+            if name == "selftrgrate":
+                on = self.ch[chans[0]]["chenable"] == "True" and self.running
+                return f"{self.crate.opt.rate * self.crate.opt.share:.1f}" if on else "0"
             return self.ch[chans[0]][name]
         if name not in self.bp:
             raise BoardError(f"{path}: not found")
@@ -345,6 +357,9 @@ class SimBoard:
             return str((1 if self.armed else 0) | (2 if self.running else 0))
         if name == "recordlengtht":
             return str(int(int(self.p("recordlengths")) * self.sample_ns()))
+        hk = self.housekeeping(name)
+        if hk is not None:
+            return hk
         if name == "pretriggert":
             return str(int(int(self.p("pretriggers")) * self.sample_ns()))
         return self.values.get(name, "")
@@ -375,6 +390,28 @@ class SimBoard:
             self.values[name[:-1] + "s"] = str(max(4, int(round(int(v) / self.sample_ns()))))
         else:
             self.values[name] = v
+
+    def running_s(self) -> float:
+        if self.t_start is None:
+            return 0.0
+        return (self.t_stop if self.t_stop is not None else self.crate.now()) - self.t_start
+
+    def housekeeping(self, name: str) -> str | None:
+        """The changing housekeeping values (None: the parameter keeps its table value)."""
+        t = self.running_s()
+        if name.startswith("tempsens"):
+            return f"{float(self.bp[name][1]) + 3.0 * (1 - math.exp(-t / 120.0)) + 0.1 * self.index:.1f}"
+        if name == "triggercnt":
+            return str(self.trigger_id)
+        if name == "realtimemonitor":
+            return str(int(t * 1e9))
+        if name == "deadtimemonitor":
+            return str(self.trigger_id * 1000)
+        if name == "livetimemonitor":
+            return str(max(0, int(t * 1e9) - self.trigger_id * 1000))
+        if name == "errorflags":
+            return "0x800" if self.err_after is not None and t >= self.err_after else "0"
+        return None
 
     def model(self) -> models.Model:
         return self.m
