@@ -255,6 +255,7 @@ class Station:
         lib = os.path.expanduser(self.settings.caen_lib_dir)
         libs = {name: os.path.isfile(os.path.join(lib, name)) for name in ("libCAEN_FELib.so", "libCAEN_Dig2.so")}
         return {"values": asdict(self.settings), "kinds": SETTING_KINDS, "choices": SETTING_CHOICES,
+                "default_folder": self.default_folder(),
                 "runs_folder": self.settings.runs_folder(),
                 "caen_libs": libs}
 
@@ -275,6 +276,13 @@ class Station:
         self.publish({"type": "settings", "settings": self.settings_payload()})
         self.config_changed()               # the check depends on the simulator setting
         self.publish({"type": "roots", "roots": [{"label": a, "path": b} for a, b in self.data_roots()]})
+
+    def default_folder(self) -> str:
+        """Where every file chooser opens: the lab's /NAS/ALAB_DAQ_DATA, when it is there and a data folder; else \"\"."""
+        d = os.path.realpath(C.DEFAULT_DATA_DIR)
+        if not os.path.isdir(d):
+            return ""
+        return d if any(os.path.realpath(p) == d for _, p in self.data_roots()) else ""
 
     def data_roots(self) -> list[tuple[str, str]]:
         """The folders whose data files users may open."""

@@ -66,6 +66,7 @@ The server never talks to the boards itself. For a run it writes the configurati
 
 | What | Where |
 |---|---|
+| Where the file choosers open | `/NAS/ALAB_DAQ_DATA/` (opening a data file, a configuration, the data folder, …), when it exists and is a data folder (it is by default); else where they did before |
 | The configuration the server opens first | `/NAS/ALAB_DAQ_DATA/alab_daq_test.json` (Settings page: *configuration file*). When it is not there yet, the server starts with the lab's setup and **Save** writes it there |
 | Each board's data | `DATA_FOLDER/RUN_BOARD.raw` (the data folder of the configuration; by default `/NAS/ALAB_DAQ_DATA/`, which must exist and be writable by the service account), e.g. `run00012_b0.raw` (the run number is one more than the highest in the data folder); a new file `_001.raw`, `_002.raw`, … at the file size of the configuration |
 | Their settings and note | the header of each `.raw` file, and `NAME.json` next to it (the configuration, the note — it follows edits during the run — and the run's facts) |

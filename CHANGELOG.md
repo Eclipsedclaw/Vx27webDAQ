@@ -5,6 +5,10 @@ What changed in each version of ALAB DAQ. Write the notes of the next version un
 
 ## Unreleased
 
+## v0.0.13 (2026-11-08)
+
+- Every file chooser opens at /NAS/ALAB_DAQ_DATA/ (when it exists and is a data folder): data files, configurations, folders.
+
 ## v0.0.12 (2026-11-08)
 
 - Pulse generator: one pulse per channel and record (the staircase only; the train is gone)

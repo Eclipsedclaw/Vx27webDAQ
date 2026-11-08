@@ -283,17 +283,21 @@ export function showTip(e, content) {
 export function hideTip() { if (tip) tip.style.display = "none"; }
 
 // ---- choosing a data file or folder on the server ----
+// where every chooser opens unless told otherwise: the lab's data folder (/NAS/ALAB_DAQ_DATA, from the server)
+let defaultFolder = "";
+export function setDefaultFolder(path) { defaultFolder = path || ""; }
+
 export async function chooseFile({ title, want = "file", kinds = ["root", "raw"], start } = {}) {
-  let folder = start || store("files.folder") || "";
+  let folder = start || defaultFolder || store("files.folder") || "";
   let chosen = null;
   const crumbs = h("div.crumbs"), list = h("ul.file-list", { style: "max-height: 52vh; min-height: 200px" });
   const roots = h("div.row");
   const filter = segmented([["all", t("ROOT and .raw")], ["root", "ROOT"], ["raw", ".raw"]], store("files.kind") || "all",
                            (v) => { store("files.kind", v); load(folder); });
   const body = h("div.stack", h("div.row", roots, h("span.spacer"), want === "file" ? filter : null), crumbs, list);
-  async function load(dir) {
+  async function load(dir, quiet = false) {
     let data;
-    try { data = await get("/api/files/list", { dir }); } catch (err) { fail(err); return; }
+    try { data = await get("/api/files/list", { dir }); } catch (err) { if (quiet) return load(""); fail(err); return; }
     folder = data.folder;
     store("files.folder", folder);
     clear(roots, data.roots.map((r) => h("button.btn.btn-sm", { type: "button", title: r.path, onclick: () => load(r.path) },
@@ -330,7 +334,7 @@ export async function chooseFile({ title, want = "file", kinds = ["root", "raw"]
                 run: () => (want === "file" ? (chosen || undefined) : folder) }],
     onOpen: (_m, done) => { finish = done; },
   });
-  load(folder);
+  load(folder, true);                      // a folder that is gone (or not a data folder): the server's default
   return result;
 }
 
@@ -460,6 +464,6 @@ export function choosePath({ title, want = "file", filters = null, start = "", n
     onOpen: (_m, done) => { finish = done; pathInput.focus(); },
   });
   if (want === "save" && name) pathInput.value = name;
-  load(start || "", { quiet: true }).then((d) => { if (!d) load(""); });      // a start that is gone: the default
+  load(start || defaultFolder || "", { quiet: true }).then((d) => { if (!d) load(""); });      // a start that is gone: the default
   return result;
 }

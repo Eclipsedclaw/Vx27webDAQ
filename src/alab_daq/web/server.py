@@ -490,7 +490,7 @@ async def put_settings(request):
 async def browse_folder(request):
     st: Station = request.app["station"]
     places = st.browse_places()
-    start = request.query.get("dir") or (os.path.dirname(os.path.abspath(st.cfg_path)) if st.cfg_path else "~")
+    start = request.query.get("dir") or st.default_folder() or (os.path.dirname(os.path.abspath(st.cfg_path)) if st.cfg_path else "~")
     listing = await asyncio.to_thread(browse, start, request.query.get("hidden") == "1")
     return {"places": [{"label": a, "path": b} for a, b in places], **listing}
 
@@ -499,7 +499,7 @@ async def browse_folder(request):
 @api("viewer")
 async def files_list(request):
     st: Station = request.app["station"]
-    folder = request.query.get("dir") or (st.data_roots()[0][1] if st.data_roots() else "")
+    folder = request.query.get("dir") or st.default_folder() or (st.data_roots()[0][1] if st.data_roots() else "")
     return {"roots": [{"label": a, "path": b} for a, b in st.data_roots()],
             **await asyncio.to_thread(st.files.listing, folder)}
 

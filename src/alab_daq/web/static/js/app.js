@@ -2,7 +2,7 @@
 // signing in and out, and the pages (#run, #config, ...).
 import { get, post } from "./api.js";
 import { loadLanguage, T, t } from "./i18n.js";
-import { append, chip, clear, dialog, fail, fmtDuration, h, icon, roleChip, store, toast } from "./ui.js";
+import { append, chip, clear, dialog, fail, fmtDuration, h, icon, roleChip, setDefaultFolder, store, toast } from "./ui.js";
 import { configPage } from "./pages/config.js";
 import { runPage } from "./pages/run.js";
 import { settingsPage } from "./pages/settings.js";
@@ -37,6 +37,7 @@ function applyMessage(msg) {
     case "hello":
       app.me = msg.me;
       app.state = msg.state;
+      setDefaultFolder(msg.state.settings.default_folder);
       return;
     case "run": {
       const old = s.run;
@@ -56,7 +57,7 @@ function applyMessage(msg) {
     case "log_reset": s.log = []; return;
     case "stats": s.stats = msg.stats; return;
     case "config": s.config = msg.config; return;
-    case "settings": s.settings = msg.settings; return;
+    case "settings": s.settings = msg.settings; setDefaultFolder(msg.settings.default_folder); return;
     case "roots": s.roots = msg.roots; return;
     case "boards": s.boards = msg.boards; return;
     case "root": s.root = msg.root; return;

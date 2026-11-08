@@ -567,7 +567,8 @@ export function configPage(root, app) {
 
   async function openFile() {
     if (app.state.config.dirty && !(await confirmDialog(t("Unsaved changes"), [t("The configuration has unsaved changes. Discard them?")], t("Discard")))) return;
-    const p = await choosePath({ title: t("Open an ALAB DAQ configuration"), want: "file", filters: CONF_FILES, start: app.state.config.path });
+    const p = await choosePath({ title: t("Open an ALAB DAQ configuration"), want: "file", filters: CONF_FILES,
+                                start: app.state.settings.default_folder || app.state.config.path });   // the lab's data folder first
     if (!p) return;
     try { app.state.config = await post("/api/config/open", { path: p }); adopt(); } catch (err) { fail(err); }
   }

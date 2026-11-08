@@ -543,6 +543,27 @@ class BrowseTests(WebTestCase):
         s = await (await self.client.get("/api/settings")).json()
         self.assertEqual(s["choices"]["simulator_pulses"], ["", "staircase"])
 
+    async def test_default_folder_of_the_choosers(self):
+        """Every file chooser opens at the lab's data folder (/NAS/ALAB_DAQ_DATA) when it is there and a data folder;
+        else where it did before."""
+        await self.login("oper1")
+        s = await (await self.client.get("/api/settings")).json()
+        self.assertEqual(s["default_folder"], "")                       # no /NAS here
+        data = os.path.realpath(os.path.join(self.root, "data"))
+        old = C.DEFAULT_DATA_DIR
+        C.DEFAULT_DATA_DIR = data                                        # as if the NAS folder were this one
+        try:
+            s = await (await self.client.get("/api/settings")).json()
+            self.assertEqual(s["default_folder"], data)
+            b = await (await self.client.get("/api/browse")).json()
+            self.assertEqual(b["folder"], data)
+            f = await (await self.client.get("/api/files/list")).json()
+            self.assertEqual(f["folder"], data)
+        finally:
+            C.DEFAULT_DATA_DIR = old
+        b = await (await self.client.get("/api/browse")).json()
+        self.assertEqual(b["folder"], os.path.realpath(self.root))      # the configuration's folder, as before
+
     async def test_default_configuration_file(self):
         """The configuration file of the settings is not there yet (the NAS default on a new computer): the server
         starts with the lab's setup, and Save writes it there."""
