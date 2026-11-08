@@ -1,6 +1,7 @@
 // The waveform panel of the Run page: the channels of one board, live from the run or from a .raw or .root file.
-// A board has 32 (V2730) or 64 (V2740) channels: the panel shows a page of 8 or 16 of them (0–7, 8–15, …). Two rows
-// of controls above the plots: what to show (source, board, channels, event), then how (ADC range, the dashed
+// A board has 16 or 32 (VX2730) or 64 (VX2740) channels: the panel shows the ones chosen with Channels… (at most
+// 16, each board its own choice, kept in this browser). "Combined" puts channels of several boards in one plot
+// instead (combined.js). Two rows of controls above the plots: what to show (source, board, channels, event), then how (ADC range, the dashed
 // trigger and threshold lines, what a drag does). The plots share the x window: a drag or the mouse wheel zooms all
 // of them to the same samples, which the server sends in full detail; in Measure mode a drag marks the same range
 // on every plot, and the table under the plots gives its numbers per channel (from all the samples). The x axes
@@ -9,6 +10,8 @@ import { get } from "./api.js";
 import { T, t } from "./i18n.js";
 import { ADC_MAX, SAMPLE_NS, WavePlot, fmtTime } from "./plots.js";
 import { basename, chip, chooseFile, clear, fail, fmtInt, fmtNum, h, icon, segmented, setText, splitter, store } from "./ui.js";
+import { MAX_SHOWN, channelPicker, defaultChannels, rangesText } from "./chanpick.js";
+import { combinedView } from "./combined.js";
 
 const RANGES = [["auto", T("Auto")], ["full", T("Full scale")], ["custom", T("Custom")], ["baseline", T("Baseline ± N")]];
 const MAX_CARDS = 16;
@@ -35,18 +38,21 @@ export function wavePanel(app, { onBoard } = {}) {
   let range = loadJSON("wave.range", { mode: "auto", lo: 8000, hi: 9000, half: 200 });
   let lines = loadJSON("wave.lines", { trigger: false, threshold: false });
   let mouse = store("wave.mouse") === "measure" ? "measure" : "zoom";
-  let perPage = store("wave.per") === "16" ? 16 : 8;
-  let group = Number(store("wave.group") || 0);
+  let viewMode = store("wave.view") === "combined" ? "combined" : "channels";
+  let sel = [];                   // the channels shown, of the board shown
   let span = null;
   let nChannels = 64, t0 = null, eventFacts = null;
   const sourceSeg = segmented([["live", t("Live")], ["file", t("File")]], source, (v) => setSource(v), { label: t("Source") });
   const fileName = h("span.chip", { title: "" });
   const openBtn = h("button.btn.btn-sm", { type: "button", onclick: pickFile }, icon("folder"), t("Open file…"));
   const boardSel = h("select.input", { "aria-label": t("Board"), onchange: () => boardChanged() });
-  const groupSel = h("select.input", { "aria-label": t("Channels"), onchange: () => { group = Number(groupSel.value); store("wave.group", group); resetZoom(); load(true); showCards(); } });
-  const perSeg = segmented([["8", "8"], ["16", "16"]], String(perPage), (v) => { perPage = Number(v); store("wave.per", v); group = 0; fillGroups(); showCards(); resetZoom(); load(true); },
-                           { label: t("Channels per page") });
-  perSeg.title = t("How many channels are shown at once");
+  const pickText = h("span.num");
+  const pickBtn = h("button.btn.btn-sm", { type: "button", "aria-expanded": "false", onclick: () => togglePicker(),
+                                          title: t("Choose the channels to show: at most 16 at a time") }, icon("grid"), pickText);
+  const picker = channelPicker({ label: t("Channels shown"), onChange: (list) => setSel(list) });
+  const pickBox = h("div.chan-box.hidden", picker.el);
+  const viewSeg = segmented([["channels", t("Channels")], ["combined", t("Combined")]], viewMode, (v) => setView(v), { label: t("View") });
+  viewSeg.title = t("Channels: the channels of one board, each in its own plot. Combined: channels of several boards in one plot, from the same moment");
   const evInput = h("input.input.num", { type: "number", min: "0", value: "0", "aria-label": t("Event"),
                                          onchange: () => setEvent(Number(evInput.value) || 0) });
   const evCount = h("span.text2.small.num");
@@ -80,19 +86,22 @@ export function wavePanel(app, { onBoard } = {}) {
   mouseSeg.title = t("What a drag across a plot does: zoom all plots to that range, or measure that range on all plots. The mouse wheel over a plot zooms the time axis in either mode.");
   const resetBtn = h("button.btn.btn-sm", { type: "button", onclick: () => { resetZoom(); load(true); },
                                             title: t("Every plot back to the whole waveform and the ADC range chosen here") }, icon("reset"), t("Reset zoom"));
-  panel.appendChild(h("div.toolbar.two-rows",
-    h("div.toolbar-row",
-      h("h2.card-title", t("Waveforms")),
-      h("div.group", sourceSeg, fileName, openBtn),
-      h("div.group", h("span.label", t("Board")), boardSel),
-      h("div.group", h("span.label", t("Channels")), groupSel, perSeg),
-      evGroup, h("span.spacer"), pauseBtn, allBtn),
-    h("div.toolbar-row",
+  const boardGroup = h("div.group", h("span.label", t("Board")), boardSel);
+  const chanGroup = h("div.group", h("span.label", t("Channels")), pickBtn);
+  const howRow = h("div.toolbar-row",
       h("div.group", h("span.label", t("ADC range")), rangeSeg, customBox, halfBox),
       h("div.group", h("span.label", t("Lines")), trigLineBtn, thrLineBtn),
       h("div.group", h("span.label", t("Mouse")), mouseSeg),
-      h("span.spacer"), resetBtn)));
+      h("span.spacer"), resetBtn);
+  panel.appendChild(h("div.toolbar.two-rows",
+    h("div.toolbar-row",
+      h("h2.card-title", t("Waveforms")), viewSeg,
+      h("div.group", sourceSeg, fileName, openBtn), boardGroup, chanGroup,
+      evGroup, h("span.spacer"), pauseBtn, allBtn),
+    howRow));
+  panel.appendChild(pickBox);
   panel.appendChild(sub);
+  const combo = combinedView(app, { getSource: () => ({ source, file }) });
 
   // ---- the plots, and the measurement under them ----
   const wrap = h("div.wave-wrap");
@@ -118,6 +127,7 @@ export function wavePanel(app, { onBoard } = {}) {
   body.classList.add("wave-body");
   body.showSecond(false);
   panel.appendChild(body);
+  panel.appendChild(combo.el);
   const cards = [];
   for (let k = 0; k < MAX_CARDS; k++) {
     const title = h("span.wave-title"), meta = h("span.wave-meta"), warn = h("span"), read = h("span.wave-read");
@@ -142,9 +152,63 @@ export function wavePanel(app, { onBoard } = {}) {
   ro.observe(wrap);
 
   function channelsShown() {
-    const first = group * perPage, out = [];
-    for (let c = first; c < Math.min(nChannels, first + perPage); c++) out.push(c);
-    return out;
+    return sel.filter((c) => c < nChannels).slice(0, MAX_SHOWN);
+  }
+
+  // the channels a board shows: as chosen in this browser, else its first 16 that are read out
+  function boardEnabled() {
+    if (source === "file" && fileInfo) return fileInfo.enabled || null;
+    const b = app.state.config.config.boards.find((x) => x.name === boardSel.value);
+    return b ? b.channels.map((c) => c.enabled) : null;
+  }
+
+  function boardTrigger() {
+    if (source === "file") return null;
+    const c = app.state.config, i = c.config.boards.findIndex((x) => x.name === boardSel.value);
+    if (i < 0 || !(c.boards[i] || {}).self_trigger) return null;
+    return c.config.boards[i].channels.map((x) => x.enabled && x.self_trigger);
+  }
+
+  function loadSel() {
+    let kept = null;
+    try { kept = JSON.parse(store(`wave.sel.${boardSel.value}`) || "null"); } catch (e) { kept = null; }
+    sel = Array.isArray(kept) ? kept.filter((c) => Number.isInteger(c) && c >= 0 && c < nChannels).slice(0, MAX_SHOWN)
+                              : defaultChannels(nChannels, boardEnabled());
+    showPick();
+  }
+
+  function setSel(list) {
+    sel = list.slice(0, MAX_SHOWN);
+    store(`wave.sel.${boardSel.value}`, JSON.stringify(sel));
+    if (enlarged !== null) enlarged = null;
+    setText(pickText, sel.length ? `${rangesText(sel)} (${sel.length})` : t("none"));
+    showCards();
+    load(true);
+  }
+
+  function showPick() {
+    setText(pickText, sel.length ? `${rangesText(sel)} (${sel.length})` : t("none"));
+    picker.set({ channels: nChannels, enabledList: boardEnabled(), triggerList: boardTrigger(), selected: sel });
+  }
+
+  function togglePicker(open) {
+    const showIt = open ?? pickBox.classList.contains("hidden");
+    pickBox.classList.toggle("hidden", !showIt);
+    pickBtn.classList.toggle("on", showIt);
+    pickBtn.setAttribute("aria-expanded", showIt ? "true" : "false");
+    layout();
+  }
+
+  function setView(v) {
+    viewMode = v;
+    store("wave.view", v);
+    viewSeg.set(v);
+    const comb = v === "combined";
+    for (const x of [boardGroup, chanGroup, howRow, sub, body]) x.classList.toggle("hidden", comb);
+    if (comb) togglePicker(false);
+    combo.setActive(comb);
+    showControls();
+    if (!comb) { layout(); load(true); }
   }
 
   function showCards() {
@@ -199,23 +263,15 @@ export function wavePanel(app, { onBoard } = {}) {
     if (list.some((b) => b.name === keep)) boardSel.value = keep;
     const b = list.find((x) => x.name === boardSel.value) || list[0];
     nChannels = b ? b.channels : 0;
-    fillGroups();
+    loadSel();
     if (onBoard) onBoard(boardSel.value);
-  }
-
-  function fillGroups() {
-    const n = Math.max(1, Math.ceil(nChannels / perPage));
-    if (group >= n) group = 0;
-    clear(groupSel, Array.from({ length: n }, (_, g) => h("option", { value: String(g) },
-      `${g * perPage}–${Math.min(nChannels, (g + 1) * perPage) - 1}`)));
-    groupSel.value = String(group);
   }
 
   function boardChanged() {
     store("wave.board", boardSel.value);
     const b = boards().find((x) => x.name === boardSel.value);
     nChannels = b ? b.channels : nChannels;
-    fillGroups();
+    loadSel();
     showCards();
     resetZoom();
     load(true);
@@ -232,14 +288,14 @@ export function wavePanel(app, { onBoard } = {}) {
   function showControls() {
     sourceSeg.set(source);
     const isFile = source === "file";
-    evGroup.classList.toggle("hidden", !isFile);
+    evGroup.classList.toggle("hidden", !isFile || viewMode === "combined");
     pauseBtn.classList.toggle("hidden", isFile);
     fileName.classList.toggle("hidden", !isFile || !file);
     setText(fileName, basename(file));
     fileName.title = file;
     customBox.classList.toggle("hidden", range.mode !== "custom");
     halfBox.classList.toggle("hidden", range.mode !== "baseline");
-    allBtn.classList.toggle("hidden", enlarged === null);
+    allBtn.classList.toggle("hidden", enlarged === null || viewMode === "combined");
     for (const [btn, on] of [[trigLineBtn, lines.trigger], [thrLineBtn, lines.threshold]]) {
       btn.classList.toggle("on", on);
       btn.setAttribute("aria-pressed", on ? "true" : "false");
@@ -277,7 +333,7 @@ export function wavePanel(app, { onBoard } = {}) {
     store("wave.source", v);
     resetZoom();
     eventFacts = null;
-    if (v === "file") await openFile(file); else { fileInfo = null; fillBoards(); showCards(); showControls(); load(true); }
+    if (v === "file") await openFile(file); else { fileInfo = null; fillBoards(); showCards(); showControls(); load(true); combo.sourceChanged(); }
   }
 
   async function pickFile() {
@@ -310,6 +366,7 @@ export function wavePanel(app, { onBoard } = {}) {
     showCards();
     showControls();
     load(true);
+    combo.sourceChanged();
   }
 
   function setEvent(k) {
@@ -393,7 +450,7 @@ export function wavePanel(app, { onBoard } = {}) {
   // ---- data ----
   let seq = null, busy = false, again = false, gone = false;
   async function load(force) {
-    if (gone) return;
+    if (gone || viewMode === "combined") return;
     if (busy) { again = again || force; return; }
     const chans = channelsShown();
     if (!boardSel.value || !chans.length) { clearPlots(); return; }
@@ -428,7 +485,7 @@ export function wavePanel(app, { onBoard } = {}) {
     boardInfo = { sample_ns: s.sample_ns || SAMPLE_NS, adc_max: s.adc_max || ADC_MAX, pre_trigger: s.pre_trigger,
                   record_length: s.record_length, model: s.model };
     eventFacts = { trigger_id: view.trigger_id, timestamp: view.timestamp };
-    if (view.n_channels && view.n_channels !== nChannels) { nChannels = view.n_channels; fillGroups(); showCards(); }
+    if (view.n_channels && view.n_channels !== nChannels) { nChannels = view.n_channels; loadSel(); showCards(); }
     const ref = view.channels.find((ch) => ch.trigger_at !== null && ch.trigger_at !== undefined);
     const newT0 = ref ? ref.trigger_at : null;
     if (newT0 !== t0) { t0 = newT0; showSpanText(); }
@@ -471,7 +528,8 @@ export function wavePanel(app, { onBoard } = {}) {
   showCards();
   showControls();
   enlarge(null);
-  const timer = setInterval(() => { if (source === "live" && !paused) load(false); },
+  setView(viewMode);
+  const timer = setInterval(() => { if (source === "live" && !paused) { if (viewMode === "combined") combo.load(false); else load(false); } },
                             Math.max(200, app.state.settings.values.refresh_ms || 500));
   requestAnimationFrame(() => { layout(); if (source === "file") openFile(file); else load(true); });
 
@@ -482,8 +540,9 @@ export function wavePanel(app, { onBoard } = {}) {
     update(type) {
       if (type === "config" && source === "live") { fillBoards(); showCards(); showControls(); }
       if (type === "run") showControls();
+      combo.update(type);
     },
-    restyle() { cards.forEach((c) => { c.plot.restyle(); c.plot.setRange(range); c.plot.setShow(lines); c.plot.setMouse(mouse); c.plot.setSpan(span); }); load(true); },
-    unmount() { gone = true; clearInterval(timer); ro.disconnect(); cards.forEach((c) => c.plot.destroy()); },
+    restyle() { cards.forEach((c) => { c.plot.restyle(); c.plot.setRange(range); c.plot.setShow(lines); c.plot.setMouse(mouse); c.plot.setSpan(span); }); load(true); combo.restyle(); },
+    unmount() { gone = true; clearInterval(timer); ro.disconnect(); cards.forEach((c) => c.plot.destroy()); combo.unmount(); },
   };
 }

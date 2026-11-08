@@ -365,6 +365,56 @@ class DaqRunTests(unittest.TestCase):
                 self.assertTrue(np.array_equal(h["trigger_id"], master["trigger_id"]), (out, name))
                 self.assertTrue(np.array_equal(h["timestamp"], master["timestamp"]), (out, name))
 
+    def test_combined_set(self):
+        """The live set of matched events: one event of every board from the same moment, and the combined view
+        of the run's files pairs the boards by trigger ID."""
+        from alab_daq.web.files import DataFiles, combined_view
+        cfg = small(C.lab_setup(), seconds=3)
+        code, log, status, d = run_daq("combined", cfg, options="--rate 30 --seed 11")
+        self.assertEqual(code, 0, log)
+        with open(os.path.join(d, "live", "combined.set"), "rb") as f:
+            info, events = R.unpack_set(f.read())
+        self.assertEqual(sorted(events), ["vx2730", "vx2740a", "vx2740b"])
+        self.assertTrue(info["chained"])
+        self.assertEqual(len({e.trigger_id for e in events.values()}), 1)
+        self.assertEqual(len({e.timestamp for e in events.values()}), 1)
+        files = DataFiles(lambda: [("data", d)])
+        path = self.files(d)["run00007_vx2740a.raw"]
+        traces = [("vx2730", 0), ("vx2740a", 1), ("vx2740b", 2), ("vx2740b", 40)]
+        view = files.combined(path, 5, traces, None, None, 400, "mv", "trigger")
+        self.assertTrue(view["matched"])
+        self.assertEqual(sorted(x["name"] for x in view["available"]), ["vx2730", "vx2740a", "vx2740b"])
+        self.assertEqual(len({b["trigger_id"] for b in view["boards"]}), 1)
+        self.assertTrue(view["same_ids"])
+        self.assertEqual(view["spread_ns"], 0)
+        by = {(t["board"], t["ch"]): t for t in view["traces"]}
+        self.assertTrue(by[("vx2730", 0)]["present"])
+        self.assertEqual(by[("vx2740b", 40)]["why"], "not read out")
+        # the VX2730 records 256 samples of 2 ns, 64 before the trigger; a VX2740 64 of 8 ns, 16 before
+        self.assertEqual(by[("vx2730", 0)]["x0_ns"], -128.0)
+        self.assertEqual(by[("vx2740a", 1)]["x0_ns"], -128.0)
+        self.assertEqual(by[("vx2740a", 1)]["step_ns"], 8.0)
+        self.assertEqual(view["range_ns"], [-128.0, 384.0])
+        # mV from the baseline: the baseline sits near 0, one count of a 16-bit board is 2000/65536 mV
+        b = {x["name"]: x for x in view["boards"]}
+        self.assertAlmostEqual(b["vx2740a"]["mv_per_adc"], 2000 / 65536)
+        self.assertAlmostEqual(b["vx2730"]["mv_per_adc"], 2000 / 16384)
+        # (the baseline is the mean of the first 16 samples; this short record has only 16 before the trigger, so a
+        # pulse's first samples can shift it by about 1 mV, against pulses of about 18 mV)
+        self.assertLess(abs(np.mean(by[("vx2740a", 1)]["y"][:8])), 3.0)
+        raw = files.combined(path, 5, traces, -50, 50, 400, "raw", "timestamp")
+        t = {(x["board"], x["ch"]): x for x in raw["traces"]}[("vx2730", 0)]
+        self.assertGreater(min(t["y"]), 100)            # raw ADC counts: around the DC offset
+        self.assertLessEqual(t["x0_ns"], -50)
+        self.assertLess(len(t["y"]), 60)                # only the window asked for
+        files.close_all()
+        # the set of a single event: each board alone
+        ev = R.decode_scope(R.encode_scope(3, 1000, [0, 1], np.full((2, 8), 100, np.uint16)))
+        one = combined_view([{"name": "x", "info": {"sample_ns": 8.0, "pre_trigger": 2, "record_length": 8,
+                                                    "model": "V2740", "adc_max": 65535}, "ev": ev, "enabled": [True, True]}],
+                            [("x", 1)], None, None, 100, "adc", "trigger")
+        self.assertEqual(one["traces"][0]["y"], [0.0] * 8)
+
     def test_periodic(self):
         cfg = small(C.default_config())
         cfg.trigger.setup, cfg.trigger.software_rate_hz, cfg.trigger.software_target = "periodic", 20, "chain"

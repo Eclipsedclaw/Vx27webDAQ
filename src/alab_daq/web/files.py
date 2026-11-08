@@ -28,6 +28,9 @@ MAX_BINS = 4000
 BASELINE_SAMPLES = 16           # the baseline of a waveform: the mean of its first 16 samples (as CAEN's demo)
 BROWSE_LIMIT = 5000
 SUMMARY_EVENTS = 200
+MAX_TRACES = 16                 # the combined view: at most this many channels in one plot
+Y_UNITS = ("mv", "adc", "raw")    # mV from the baseline, ADC counts from the baseline, raw ADC counts
+ALIGNS = ("trigger", "timestamp")  # time 0: each board's own trigger, or the first board's (timestamps)
 
 
 class FileAccessError(PermissionError):
@@ -126,6 +129,74 @@ def channel_view(samples, enabled: bool, ch: int, trigger, full_length: int, x0:
     return out
 
 
+def mv_per_adc(info: dict) -> float:
+    """One ADC count in mV: the model's input range (2 Vpp on the V2730 and V2740) over its ADC scale."""
+    m = models.model(info.get("model") or "")
+    return (m.input_vpp if m else 2.0) * 1000.0 / ((info.get("adc_max") or 65535) + 1)
+
+
+def trace_view(samples, info: dict, shift_ns: float, t_lo: float | None, t_hi: float | None, bins: int,
+               yunit: str) -> dict:
+    """One channel for the combined plot: x in ns from the trigger (+ shift_ns), y in yunit, the samples of
+    the time window [t_lo, t_hi] thinned to `bins` points like envelope()."""
+    if samples is None:
+        return {"present": False}
+    s = np.asarray(samples)
+    if not len(s):
+        return {"present": False}
+    ns, pre = float(info["sample_ns"]), int(info.get("pre_trigger") or 0)
+    first = -pre * ns + shift_ns                       # the time of sample 0
+    i0 = 0 if t_lo is None else max(0, min(len(s), math.floor((t_lo - first) / ns)))
+    i1 = len(s) if t_hi is None else max(i0, min(len(s), math.ceil((t_hi - first) / ns) + 1))
+    env = envelope(s, i0, i1, bins)
+    base = float(s[:BASELINE_SAMPLES].mean())
+    y = np.asarray(env["y"], dtype=float)
+    if yunit == "mv":
+        y = np.round((y - base) * mv_per_adc(info), 3)
+    elif yunit == "adc":
+        y = np.round(y - base, 2)
+    return {"present": True, "mode": env["mode"], "x0_ns": first + env["x0"] * ns, "step_ns": env["step"] * ns,
+            "y": y.tolist(), "baseline": base, "nsamps": int(len(s)), "std": float(s[:BASELINE_SAMPLES].std())}
+
+
+def combined_view(entries: list[dict], traces: list[tuple[str, int]], t_lo: float | None, t_hi: float | None,
+                  bins: int, yunit: str, align: str) -> dict:
+    """Channels of several boards in one plot. entries: per board {name, info (board_lines), ev, enabled}; the
+    time axis covers every board's window: each from its own trigger, or (align \"timestamp\") shifted by its
+    timestamp against the first board's, so the same moment lines up on all boards."""
+    ref = next((e["ev"].timestamp for e in entries if e["ev"] is not None), None)
+    boards, lo, hi = [], None, None
+    for e in entries:
+        info, ev = e["info"], e["ev"]
+        ns, pre = float(info["sample_ns"]), int(info.get("pre_trigger") or 0)
+        rec = int(info.get("record_length") or (ev.samples if ev is not None else 0))
+        shift = (ev.timestamp - ref) * rawdata.TIMESTAMP_NS if align == "timestamp" and ev is not None and ref is not None else 0
+        win = [-pre * ns + shift, (rec - pre) * ns + shift]
+        lo, hi = (win[0] if lo is None else min(lo, win[0])), (win[1] if hi is None else max(hi, win[1]))
+        e["shift"] = shift
+        boards.append({"name": e["name"], "model": info.get("model"), "sample_ns": ns, "pre_trigger": pre,
+                       "record_length": rec, "adc_max": info.get("adc_max"), "mv_per_adc": mv_per_adc(info),
+                       "shift_ns": shift, "window_ns": win, "present": ev is not None,
+                       "trigger_id": ev.trigger_id if ev is not None else None,
+                       "timestamp": ev.timestamp if ev is not None else None})
+    by_name = {e["name"]: e for e in entries}
+    out = []
+    for name, c in traces:
+        e = by_name.get(name)
+        if e is None:
+            out.append({"board": name, "ch": c, "present": False, "why": "no such board"})
+            continue
+        enabled = e["enabled"][c] if c < len(e["enabled"]) else False
+        samples = e["ev"].waveform(c) if e["ev"] is not None else None
+        v = trace_view(samples, e["info"], e["shift"], t_lo, t_hi, bins, yunit)
+        why = "" if v["present"] else ("not read out" if not enabled else "no event" if e["ev"] is None else "not in this event")
+        out.append({"board": name, "ch": c, "enabled": enabled, "why": why, **v})
+    ids = {b["trigger_id"] for b in boards if b["present"]}
+    stamps = [b["timestamp"] for b in boards if b["present"]]
+    return {"boards": boards, "traces": out, "range_ns": [lo or 0.0, hi or 0.0], "yunit": yunit, "align": align,
+            "same_ids": len(ids) == 1, "spread_ns": (max(stamps) - min(stamps)) * rawdata.TIMESTAMP_NS if stamps else None}
+
+
 def board_lines(cfg: C.DaqConfig | None, board: C.Board | None, status: dict | None = None,
                 header_board: dict | None = None) -> dict:
     """The facts of a board's records and, per channel, where the trigger (sample pre_trigger) and the threshold
@@ -220,6 +291,29 @@ class OpenFile:
         self.board = self.cfg.board(name) if self.cfg and name else None
         note = _side_note(path) if self.kind == "raw" else _side_note(path[:-5] + ".raw")
         self.note = note if note is not None else str(self.header.get("note") or "")
+        self._ids = None
+
+    def find_trigger(self, trigger_id: int) -> int | None:
+        """The number of the event with this trigger ID (the first, if the 24-bit IDs went round), or None."""
+        with self.lock:
+            if self._ids is None:
+                if self.kind == "raw":
+                    ids = self.raw.headers()["trigger_id"].astype(np.int64)
+                else:
+                    ids = np.asarray(self.tree["trigger_id"].array(library="np"), dtype=np.int64)
+                order = np.argsort(ids, kind="stable")
+                self._ids = (ids[order], order)
+        s, order = self._ids
+        i = int(np.searchsorted(s, trigger_id))
+        return int(order[i]) if i < len(s) and s[i] == trigger_id else None
+
+    def enabled(self) -> list[bool]:
+        """Per channel: read out in the run (from the configuration in the header, else from the first event)."""
+        n = len(self.lines()["lines"])
+        if self.board is not None:
+            return [c < len(self.board.channels) and self.board.channels[c].enabled for c in range(n)]
+        ev = self.event(0) if self.n else None
+        return [bool(ev is not None and c in ev.channels) for c in range(n)]
 
     def event(self, k: int) -> rawdata.ScopeEvent:
         if not 0 <= k < self.n:
@@ -253,7 +347,7 @@ class OpenFile:
 
 
 class DataFiles:
-    def __init__(self, roots, cache_size: int = 4):
+    def __init__(self, roots, cache_size: int = 16):
         """roots() returns the data folders [(label, path)]."""
         self.roots = roots
         self._open: OrderedDict[str, OpenFile] = OrderedDict()
@@ -324,7 +418,7 @@ class DataFiles:
         f = self.open(path)
         lines = f.lines()
         return {"path": f.path, "kind": f.kind, "events": f.n, "size": f.stamp[1], "truncated": f.truncated,
-                "channels": len(lines["lines"]), "settings": f.settings(),
+                "channels": len(lines["lines"]), "settings": f.settings(), "enabled": f.enabled(),
                 **{k: lines[k] for k in ("record_length", "pre_trigger", "sample_ns", "adc_max", "model")}}
 
     def waveforms(self, path: str, k: int, channels: list[int], x0: int, x1: int | None, bins: int,
@@ -347,6 +441,59 @@ class DataFiles:
                 "settings": {**f.settings(), **{x: info[x] for x in ("record_length", "pre_trigger", "sample_ns",
                                                                      "adc_max", "model")}},
                 "channels": out, "n_channels": len(info["lines"])}
+
+    def run_files(self, f: OpenFile) -> dict[str, list[OpenFile]]:
+        """The files of the same run as f in its folder, one board each (in parts: _001, ...): {board: [files]}."""
+        run, folder, suffix = f.header.get("run"), os.path.dirname(f.path), "." + f.kind
+        out: dict[str, list] = {}
+        if not run:
+            return {f.board_header.get("name") or "?": [f]}
+        for name in sorted(os.listdir(folder)):
+            if not (name.startswith(f"{run}_") and name.lower().endswith(suffix)):
+                continue
+            try:
+                g = f if os.path.join(folder, name) == f.path else self.open(os.path.join(folder, name))
+            except (OSError, rawdata.RawFormatError, FileAccessError):
+                continue
+            if g.header.get("run") != run:
+                continue
+            out.setdefault(g.board_header.get("name") or "?", []).append(g)
+        for files in out.values():
+            files.sort(key=lambda g: int(g.header.get("file_index") or 0))
+        return out
+
+    def combined(self, path: str, k: int, traces: list[tuple[str, int]], t_lo: float | None, t_hi: float | None,
+                 bins: int, yunit: str, align: str) -> dict:
+        """The combined view of a run's files: event k of the file given, and the event with its trigger ID in
+        the files of the run's other boards."""
+        f = self.open(path)
+        ev = f.event(k) if f.n else None
+        own = f.board_header.get("name") or "?"
+        by_board = self.run_files(f)
+        entries, missing = [], []
+        for name in dict.fromkeys(b for b, _ in traces):
+            files = by_board.get(name)
+            if not files:
+                continue
+            if name == own:
+                e = ev
+            else:
+                e = None
+                for g in files if ev is not None else []:
+                    j = g.find_trigger(ev.trigger_id)
+                    if j is not None:
+                        e = g.event(j)
+                        break
+                if e is None:
+                    missing.append(name)
+            g = files[0]
+            entries.append({"name": name, "info": g.lines(), "ev": e, "enabled": g.enabled()})
+        out = combined_view(entries, traces, t_lo, t_hi, bins, yunit, align)
+        out.update(source="file", path=f.path, event=k, events=f.n, board=own, missing=missing, run=f.header.get("run"),
+                   matched=not missing, available=[{"name": n, "channels": len(fs[0].lines()["lines"]),
+                                                    "enabled": fs[0].enabled(), "model": fs[0].board_header.get("model")}
+                                                   for n, fs in by_board.items()])
+        return out
 
     def overview(self, path: str) -> dict:
         """Per channel baseline, noise and peak, from up to SUMMARY_EVENTS events spread over the file."""

@@ -19,6 +19,7 @@ class Model:
     decimation: bool        # has DecimationFactor (2740, 2745)
     gain: bool              # has the variable gain amplifier, ChGain in dB (2745)
     text: str
+    input_vpp: float = 2.0  # the input range in volts peak to peak (CAEN data sheets): for the mV axis
 
     @property
     def adc_max(self) -> int:
@@ -27,6 +28,10 @@ class Model:
     @property
     def msps(self) -> float:
         return 1000.0 / self.sample_ns
+
+    @property
+    def mv_per_adc(self) -> float:
+        return self.input_vpp * 1000.0 / (1 << self.adc_bits)
 
 
 MODELS = {
@@ -56,8 +61,8 @@ def from_board(info: dict) -> Model:
     return Model(family(info.get("model", "")) or "?", int(info.get("channels") or (known.channels if known else 64)),
                  int(info.get("adc_bits") or (known.adc_bits if known else 16)), 1000.0 / msps,
                  known.decimation if known else False, known.gain if known else False,
-                 info.get("model", "unknown model"))
+                 info.get("model", "unknown model"), known.input_vpp if known else 2.0)
 
 
 def table() -> list[dict]:
-    return [dict(asdict(m), adc_max=m.adc_max) for m in MODELS.values()]
+    return [dict(asdict(m), adc_max=m.adc_max, mv_per_adc=m.mv_per_adc) for m in MODELS.values()]

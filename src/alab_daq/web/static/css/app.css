@@ -527,3 +527,37 @@ details.explain p { margin: 6px 0 0; font-size: 12.5px; color: var(--text-2); li
 .cfg-extra textarea { width: 100%; }
 .table.plan-table td { font-size: 12px; padding: 3px 8px; vertical-align: top; }
 .table.plan-table td.mono { white-space: nowrap; }
+
+/* ---- choosing channels (at most 16) and the combined view of several boards ---- */
+.chan-box { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px;
+            display: flex; flex-direction: column; gap: 8px; }
+.chan-pick { display: flex; flex-direction: column; gap: 8px; }
+.chan-presets { gap: 6px; }
+.chan-grid { display: grid; grid-template-columns: repeat(var(--cols, 16), minmax(30px, 1fr)); gap: 4px; }
+@media (max-width: 700px) { .chan-grid { grid-template-columns: repeat(8, minmax(30px, 1fr)); } }
+.chan { position: relative; height: 28px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+        background: var(--surface); color: var(--text); font: inherit; font-size: 12px; font-variant-numeric: tabular-nums;
+        cursor: pointer; padding: 0; }
+.chan:hover { background: var(--hover); }
+.chan.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 620; }
+.chan.dim:not(.on) { color: var(--muted); border-style: dashed; }
+.chan.full:not(.on) { opacity: 0.45; }
+.chan.trg::after { content: ""; position: absolute; top: 3px; right: 3px; width: 5px; height: 5px; border-radius: 50%;
+                   background: var(--warning); }
+.comb { display: flex; flex-direction: column; gap: 8px; flex: 1 1 auto; min-height: 0; }
+.comb-body { flex: 1 1 auto; min-height: 220px; display: flex; background: var(--surface); border: 1px solid var(--border);
+             border-radius: var(--radius); box-shadow: var(--shadow); padding: 8px 4px 4px 0; }
+.comb-body .wave-plot { flex: 1 1 auto; min-height: 200px; }
+.comb-plot { position: absolute; inset: 0 6px 4px 2px; }
+.comb-chips { gap: 6px; min-width: 0; }
+.comb-chip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 4px 0 8px; border-radius: 999px;
+             border: 1px solid var(--border); background: var(--surface-2); font-size: 12px; white-space: nowrap; }
+.comb-chip.muted { color: var(--muted); border-style: dashed; }
+.swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; display: inline-block; }
+.btn-icon.mini { width: 20px; height: 20px; border: 0; border-radius: 50%; background: transparent; color: var(--text-2);
+                 cursor: pointer; font-size: 14px; line-height: 1; padding: 0; }
+.btn-icon.mini:hover { background: var(--hover); color: var(--text); }
+.comb-read { gap: 4px 14px; font-size: 12px; min-height: 20px; padding: 0 4px; color: var(--text-2); }
+.comb-val { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.comb-val b { color: var(--text); font-weight: 600; }
+.comb-time { color: var(--text); font-weight: 600; }

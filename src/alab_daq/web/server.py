@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import os
+import re
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -23,7 +24,7 @@ from alab_daq.core.rawdata import RawFormatError
 from alab_daq.web.accounts import SESSION_MAX_S, AccountError, rank
 from alab_daq.web.boardcheck import CheckError
 from alab_daq.web.converter import ConvertError
-from alab_daq.web.files import browse
+from alab_daq.web.files import ALIGNS, MAX_TRACES, Y_UNITS, browse
 from alab_daq.web.runs import RunError
 from alab_daq.web.station import Station
 
@@ -154,6 +155,43 @@ def channels_query(request: web.Request) -> list[int]:
     if any(c < 0 or c > 63 for c in out):
         raise ValueError("channels are 0-63")
     return sorted(set(out))[:MAX_CHANNELS_ASKED]
+
+
+TRACE_BOARD = re.compile(r"^[A-Za-z0-9_.-]{1,40}$")
+
+
+def traces_query(request: web.Request) -> list[tuple[str, int]]:
+    """traces=b0:3,vx2740a:12 -> [(\"b0\", 3), (\"vx2740a\", 12)] (at most MAX_TRACES)."""
+    out: list[tuple[str, int]] = []
+    for part in request.query.get("traces", "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, _, ch = part.rpartition(":")
+        if not TRACE_BOARD.match(name) or not ch.isdigit() or int(ch) > 63:
+            raise ValueError(f"a trace is BOARD:CHANNEL, not {part}")
+        if (name, int(ch)) not in out:
+            out.append((name, int(ch)))
+    if len(out) > MAX_TRACES:
+        raise ValueError(f"at most {MAX_TRACES} channels in one plot")
+    return out
+
+
+def float_query(request: web.Request, key: str) -> float | None:
+    raw = request.query.get(key)
+    if raw in (None, ""):
+        return None
+    value = float(raw)
+    if value != value or abs(value) > 1e12:
+        raise ValueError(f"{key} is not a time")
+    return value
+
+
+def choice_query(request: web.Request, key: str, choices: tuple) -> str:
+    value = request.query.get(key) or choices[0]
+    if value not in choices:
+        raise ValueError(f"{key} is one of {', '.join(choices)}")
+    return value
 
 
 # ---- the page ----
@@ -464,6 +502,24 @@ async def live_waveforms(request):
 
 
 @api("viewer")
+async def live_combined(request):
+    st: Station = request.app["station"]
+    return await asyncio.to_thread(st.runs.live_combined, traces_query(request), float_query(request, "t0"),
+                                   float_query(request, "t1"), int_query(request, "bins", 800, 16, 4000),
+                                   choice_query(request, "y", Y_UNITS), choice_query(request, "align", ALIGNS),
+                                   int_query(request, "since", None))
+
+
+@api("viewer")
+async def files_combined(request):
+    st: Station = request.app["station"]
+    return await asyncio.to_thread(st.files.combined, request.query.get("path", ""), int_query(request, "event", 0, 0),
+                                   traces_query(request), float_query(request, "t0"), float_query(request, "t1"),
+                                   int_query(request, "bins", 800, 16, 4000), choice_query(request, "y", Y_UNITS),
+                                   choice_query(request, "align", ALIGNS))
+
+
+@api("viewer")
 async def live_boards(request):
     return {"boards": request.app["station"].runs.live_boards()}
 
@@ -539,6 +595,8 @@ def create_app(station: Station | None = None) -> web.Application:
     r.add_get("/api/live/waveforms", live_waveforms)
     r.add_get("/api/live/boards", live_boards)
     r.add_get("/api/live/overview", live_overview)
+    r.add_get("/api/live/combined", live_combined)
+    r.add_get("/api/files/combined", files_combined)
     r.add_post("/api/root/convert", root_convert)
     r.add_post("/api/root/cancel", root_cancel)
 

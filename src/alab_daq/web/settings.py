@@ -16,6 +16,8 @@ import tempfile
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
+from alab_daq.core.config import DEFAULT_CONFIG_FILE, DEFAULT_DATA_DIR
+
 PROJECT = Path(__file__).resolve().parents[3]      # the source folder, or the build
 DEFAULT_PORT = 8770
 DEFAULT_RUNS = "ALAB_DAQ_runs"                      # in the home folder, when no save folder is given
@@ -33,12 +35,12 @@ def state_dir() -> Path:
 
 @dataclass
 class ServerSettings:
-    config_file: str = ""           # a configuration (.json) opened when the server starts with nothing being edited
+    config_file: str = DEFAULT_CONFIG_FILE     # opened when the server starts with nothing being edited
     caen_lib_dir: str = str(PROJECT / "caen" / "lib")      # libCAEN_FELib.so and libCAEN_Dig2.so (caen_libs.sh)
     use_simulator: bool = False
     simulator_options: str = "--rate 20"
     runs_dir: str = ""              # run records and users' outputs; empty: ~/ALAB_DAQ_runs
-    data_dirs: list[str] = field(default_factory=list)     # more folders whose data files users may open
+    data_dirs: list[str] = field(default_factory=lambda: [DEFAULT_DATA_DIR])  # more folders of data files to open
     convert_to_root: bool = True    # after every run, its .raw files are converted to .root
     refresh_ms: int = 500           # how often the live view asks for new waveforms
     guests: bool = True             # people who are not signed in may view and use the viewer tools

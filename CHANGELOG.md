@@ -5,6 +5,10 @@ What changed in each version of ALAB DAQ. Write the notes of the next version un
 
 ## Unreleased
 
+## v0.0.4 (2026-11-08)
+
+- Channels and combined view. The waveforms show the channels chosen with **Channels…** (at most 16 at a time, each board its own choice, quick choices by 16, read out, in trigger) instead of pages of 8 or 16. A **Combined** view puts channels of several boards in one plot, from one moment: the DAQ program keeps the first event of every timestamp cell (2^25 ticks, 0.27 s) of each board and writes the newest cell all boards share as `live/combined.set`; from files the run's boards are paired by trigger ID (`.raw` and ROOT). Time in µs from each board's trigger or lined up by timestamps, the window of every board; y in mV from the baseline (each model's 2 Vpp input range), ADC from the baseline or raw ADC. Defaults: the configuration file `/NAS/ALAB_DAQ_DATA/alab_daq_test.json` (the lab's setup until it is saved there) and the data folder `/NAS/ALAB_DAQ_DATA/`.
+
 ## v0.0.3 (2026-11-07)
 
 - Master trigger: the lab's setup. A new trigger setup, the master self-triggers and the others follow: the first board (the VX2730) triggers on its own channels and sends its trigger on TRG-OUT (ITLA, or AcceptTrg: only the triggers it took); the VX2740s take it on TRG-IN and pass it on. Each board has its own number of channels (a VX2730 with 16 inputs), with **Use what the boards said** to take model and channels from the board check; the starting configuration is the lab's (VX2730 at 192.168.0.72, VX2740s at .75 and .85, the same 4.096 µs window); thresholds and the threshold lines only where a board triggers on its own channels. README: the boards' network (192.168.0.x).

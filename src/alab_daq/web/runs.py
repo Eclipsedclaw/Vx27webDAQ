@@ -30,7 +30,7 @@ from alab_daq import __version__
 from alab_daq.core import config as C
 from alab_daq.core import rawdata
 from alab_daq.core.system import disk_free, running_daq
-from alab_daq.web.files import channel_view, board_lines, side_json
+from alab_daq.web.files import board_lines, channel_view, combined_view, side_json
 from alab_daq.web.settings import PROJECT, write_atomic
 
 KILL_AFTER_S = 15           # Kill is offered when the DAQ has not ended this long after Stop
@@ -62,6 +62,8 @@ class Active:
     status_mtime: int = 0
     latest: dict = field(default_factory=dict)  # board name -> (ScopeEvent, number of the live event)
     live_mtimes: dict = field(default_factory=dict)
+    combined: dict = field(default_factory=dict)    # live/combined.set: {"info", "events"}
+    combined_mtime: int = 0
     mbps: list = field(default_factory=list)    # [run time s, MB/s of all boards]
     stop_sent_at: float | None = None
     stopped_by: str = ""
@@ -112,6 +114,7 @@ class RunManager:
         self.active: Active | None = None
         self.last: dict | None = None               # the snapshot of the run that ended last
         self.last_latest: dict = {}                 # and its newest events
+        self.last_combined: dict = {}               # and its last set of matched events
         self.last_cfg: C.DaqConfig | None = None
         self.lines: list = []                       # [number, text, error]
         self.line_no = 0
@@ -366,6 +369,16 @@ class RunManager:
             a.live_mtimes[n] = mtime
             a.latest[n[:-4]] = ev
             got = True
+        path = os.path.join(live, "combined.set")
+        try:
+            mtime = os.stat(path).st_mtime_ns
+            if a.combined_mtime != mtime:
+                with open(path, "rb") as f:
+                    info, events = rawdata.unpack_set(f.read())
+                a.combined, a.combined_mtime = {"info": info, "events": events}, mtime
+                got = True
+        except (OSError, rawdata.RawFormatError, KeyError, ValueError):
+            pass
         return got
 
     def _ended(self, a: Active) -> int | None:
@@ -419,7 +432,7 @@ class RunManager:
         except OSError:
             pass
         self.last = self._snapshot(a, final=True, phase=phase, errors=errors, code=code)
-        self.last_latest, self.last_cfg = a.latest, a.cfg
+        self.last_latest, self.last_cfg, self.last_combined = a.latest, a.cfg, a.combined
         self.active = None
         self.live_seq += 1
         self.publish_state()
@@ -537,6 +550,35 @@ class RunManager:
                 "settings": {"source": "live", "run_dir": run_dir, "run": os.path.basename(run_dir) if run_dir else None,
                              **{k: info[k] for k in ("record_length", "pre_trigger", "sample_ns", "adc_max", "model")}},
                 "channels": out, "n_channels": len(b.channels)}
+
+    def live_combined(self, traces: list[tuple[str, int]], t_lo: float | None, t_hi: float | None, bins: int,
+                      yunit: str, align: str, since: int | None = None) -> dict:
+        """Channels of several boards in one plot, from one moment: the DAQ's matched set (live/combined.set),
+        else (no set yet) each board's newest event, marked as not matched."""
+        if since is not None and since == self.live_seq:
+            return {"same": True, "seq": self.live_seq}
+        a = self.active
+        if a is not None:
+            latest, cfg, comb, status = a.latest, a.cfg, a.combined, a.status
+        else:
+            latest, cfg, comb, status = self.last_latest, self.last_cfg or self.station.cfg, self.last_combined, self.last or {}
+        status_boards = {b.get("name"): b for b in status.get("boards", [])}
+        events = comb.get("events") or {}
+        names = [n for n in dict.fromkeys(b for b, _ in traces) if cfg.board(n) is not None]
+        matched = bool(names) and all(n in events for n in names)
+        entries = []
+        for n in names:
+            b = cfg.board(n)
+            entries.append({"name": n, "info": board_lines(cfg, b, status_boards.get(n)),
+                            "ev": events.get(n) if matched else latest.get(n),
+                            "enabled": [ch.enabled for ch in b.channels]})
+        out = combined_view(entries, traces, t_lo, t_hi, bins, yunit, align)
+        info = comb.get("info") or {}
+        chained = info.get("chained", cfg.run.sync == "chain" and len(cfg.active()) > 1)
+        out.update(source="live", seq=self.live_seq, running=a is not None, matched=matched, chained=bool(chained),
+                   available=[{"name": b.name, "channels": len(b.channels), "model": b.model,
+                               "enabled": [ch.enabled for ch in b.channels]} for _, b in cfg.active()])
+        return out
 
     def live_overview(self) -> dict:
         """One row per board of the newest events: per channel baseline, noise and peak."""

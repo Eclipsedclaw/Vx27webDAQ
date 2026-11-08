@@ -100,12 +100,16 @@ class Trigger:
     master_out: str = "ITLA"    # setup "master": what the master sends on TRG-OUT
 
 
+DEFAULT_DATA_DIR = "/NAS/ALAB_DAQ_DATA"                         # the lab's NAS: where runs write their data
+DEFAULT_CONFIG_FILE = "/NAS/ALAB_DAQ_DATA/alab_daq_test.json"  # the configuration the server opens first
+
+
 @dataclass
 class RunSettings:
     duration_s: int = 60        # 0: until Stop
     max_events: int = 0         # 0: no limit; else stop when the first board has this many events
     sync: str = "chain"
-    data_dir: str = "~/ALAB_DAQ_data"
+    data_dir: str = DEFAULT_DATA_DIR
     write_raw: bool = True
     file_mb: int = 2048         # a new file when one reaches this size
 

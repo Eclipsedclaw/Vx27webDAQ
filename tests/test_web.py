@@ -216,6 +216,21 @@ class RunTests(WebTestCase):
         self.assertTrue(same.get("same") or same.get("seq") != v["seq"])
         ov = await (await self.client.get("/api/live/overview")).json()
         self.assertEqual([b["name"] for b in ov["boards"]], ["b0", "b1"])
+        # the combined view: one moment of both boards (the DAQ's matched set)
+        async def matched():
+            c = await (await self.client.get("/api/live/combined", params={"traces": "b0:0,b1:1,b1:2"})).json()
+            return c.get("matched")
+        await self.wait(matched, 15, "a matched live set")
+        c = await (await self.client.get("/api/live/combined", params={"traces": "b0:0,b1:1", "y": "adc", "align": "timestamp"})).json()
+        self.assertTrue(c["same_ids"] and c["chained"])
+        self.assertEqual([(b["name"], b["sample_ns"]) for b in c["boards"]], [("b0", 8.0), ("b1", 2.0)])
+        self.assertEqual([x["name"] for x in c["available"]], ["b0", "b1"])
+        self.assertEqual(c["range_ns"], [-128.0, 384.0])
+        for bad in ("b0:0,../x:1", "b0:64", ",".join(f"b0:{k}" for k in range(17))):
+            r = await self.client.get("/api/live/combined", params={"traces": bad})
+            self.assertEqual(r.status, 400, bad)
+        r = await self.client.get("/api/live/combined", params={"traces": "b0:0", "y": "volts"})
+        self.assertEqual(r.status, 400)
         await self.wait(self.ended, 30, "the end of the run")
         run = await self.run_state()
         last = run["last"]
@@ -250,6 +265,10 @@ class RunTests(WebTestCase):
         self.assertEqual(wr["channels"][0]["data"]["y"], wraw["channels"][0]["data"]["y"])     # ROOT = raw
         ov = await (await self.client.get("/api/files/overview", params={"path": root})).json()
         self.assertEqual(ov["boards"][0]["channels"], 32)
+        cr = await (await self.client.get("/api/files/combined", params={"path": root, "event": 2, "traces": "b0:0,b1:1"})).json()
+        self.assertTrue(cr["matched"])                                  # ROOT files pair by trigger ID too
+        self.assertEqual(len({b["trigger_id"] for b in cr["boards"]}), 1)
+        self.assertEqual(info["enabled"][:5], [True, True, True, True, False])
         r = await self.client.get("/api/files/info", params={"path": "/etc/passwd"})
         self.assertEqual(r.status, 403)                                  # only the data folders
         r = await self.client.post("/api/root/convert", json={"path": files[0]}, headers=CHANGE)
@@ -412,6 +431,24 @@ class ConfigTests(WebTestCase):
 
 
 class BrowseTests(WebTestCase):
+    async def test_default_configuration_file(self):
+        """The configuration file of the settings is not there yet (the NAS default on a new computer): the server
+        starts with the lab's setup, and Save writes it there."""
+        self.assertEqual(ServerSettings().config_file, "/NAS/ALAB_DAQ_DATA/alab_daq_test.json")
+        self.assertEqual(ServerSettings().data_dirs, ["/NAS/ALAB_DAQ_DATA"])
+        self.assertEqual(C.RunSettings().data_dir, "/NAS/ALAB_DAQ_DATA")
+        missing = os.path.join(self.root, "nas", "alab_daq_test.json")
+        os.makedirs(os.path.dirname(missing))
+        save_settings(ServerSettings(config_file=missing, use_simulator=True, runs_dir=os.path.join(self.root, "runs")))
+        if os.path.exists(self.station._draft_file()):
+            os.remove(self.station._draft_file())
+        st = Station()
+        self.assertEqual((st.cfg_path, st.cfg_dirty), (missing, True))
+        self.assertEqual([b.name for b in st.cfg.boards], ["vx2730", "vx2740a", "vx2740b"])
+        st.save_config(None, "admin1")
+        cfg, _ = C.load_config(missing)
+        self.assertEqual(cfg.boards[0].n_channels, 16)
+
     async def test_choosers(self):
         await self.login("oper1")
         r = await self.client.get("/api/browse", params={"dir": self.root})
@@ -468,6 +505,7 @@ class PageTests(WebTestCase):
         used |= set(ROLES) | {"data", "runs", "home", "configuration", "CAEN libraries", "computer"}     # chooser places
         used |= {"ok", "failed", "mismatch", "cancelled", "exists"}                                     # conversions
         used |= {"stop record", "time-out", "error"}                                                    # how a board ended
+        used |= {"not read out", "no event", "not in this event", "no such board"}                       # combined view
         cfg = C.default_config()
         for setup in C.SETUPS:                                          # the reasons in "What this board gets"
             for target in C.SOFTWARE_TARGETS:

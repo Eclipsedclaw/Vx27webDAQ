@@ -164,9 +164,10 @@ class Scan:
     other: int = 0              # events of other formats
 
 
-def scan(buf, start: int = 0, end: int | None = None) -> Scan:
+def scan(buf, start: int = 0, end: int | None = None, offsets: list | None = None) -> Scan:
     """Walk the event headers from start: count the Scope events, keep the special ones. Stops at the end of
-    the last complete event; a header that cannot be one raises RawFormatError."""
+    the last complete event; a header that cannot be one raises RawFormatError. offsets: a list that gets the
+    offset of every Scope event."""
     end = len(buf) if end is None else end
     out, o = Scan(end=start), start
     while end - o >= WORD:
@@ -179,6 +180,8 @@ def scan(buf, start: int = 0, end: int | None = None) -> Scan:
         if fmt == FORMAT_SCOPE:
             out.events += 1
             out.last_scope = o
+            if offsets is not None:
+                offsets.append(o)
             if out.first_scope is None:
                 out.first_scope = o
         elif fmt == FORMAT_SPECIAL:
@@ -225,6 +228,31 @@ def encode_stop(time_tag: int, dead_time: int = 0) -> bytes:
 
 
 # ---- files ----
+def pack_set(info: dict, events: list[bytes]) -> bytes:
+    """The DAQ's live/combined.set: one event of every board, from the same moment. 4 bytes (little-endian)
+    the length of a JSON header ({"boards": [{"name", "size", ...}], ...}), the header, then the events in
+    the order of the boards, each as the board sent it."""
+    blob = json.dumps(info).encode()
+    return struct.pack("<I", len(blob)) + blob + b"".join(bytes(e) for e in events)
+
+
+def unpack_set(data: bytes) -> tuple[dict, dict]:
+    """(header, {board name: ScopeEvent}) of a live/combined.set."""
+    if len(data) < 4:
+        raise RawFormatError("a set file shorter than its header")
+    (n,) = struct.unpack_from("<I", data, 0)
+    try:
+        info = json.loads(bytes(data[4:4 + n]).decode())
+    except ValueError as err:
+        raise RawFormatError(f"the header of a set file: {err}") from None
+    events, o = {}, 4 + n
+    for b in info.get("boards", []):
+        size = int(b["size"])
+        events[b["name"]] = decode_scope(data[o:o + size])
+        o += size
+    return info, events
+
+
 def file_prefix(header: dict) -> bytes:
     text = json.dumps(header, indent=1, sort_keys=False).encode("utf-8")
     text += b" " * (-len(text) % WORD)

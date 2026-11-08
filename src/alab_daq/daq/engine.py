@@ -8,6 +8,7 @@ RUN_FOLDER/config.json is the run's configuration (written by the server: the co
 run's name). The program prints its log (the server keeps it as daq.log) and writes into RUN_FOLDER:
     status.json      twice a second: the phase, and each board's state, counters and files
     live/NAME.evt    the newest event of each board, as the board sent it (the page's live waveforms)
+    live/combined.set  one event of every board from the same moment (the page's combined view; write_set)
 and the data, one stream per board, as the board sent it: DATA_FOLDER/RUN_NAME_BOARD.raw (and _001.raw ...
 when a file reaches file_mb). See core/rawdata.py.
 
@@ -32,6 +33,8 @@ import threading
 import time
 from collections import deque
 
+import numpy as np
+
 from alab_daq import __version__
 from alab_daq.core import config as C
 from alab_daq.core import models, rawdata
@@ -43,6 +46,10 @@ LIVE_S = 0.25               # the newest event of a board is written at most thi
 MONITOR_S = 10.0            # temperatures and the acquisition status
 SILENT_WARN_S = 5.0         # a board without any data this long after the start gets a warning
 RATE_WINDOW_S = 10.0
+GRID_SHIFT = 25             # timestamp cells of 2**25 ticks (0.27 s): each board keeps the first event of each
+GRID_KEEP = 16             # cells kept per board
+SET_S = 0.3                # how often the matched set is written (when there is a newer one)
+TS_MASK = (1 << 48) - 1
 
 
 def stamp() -> str:
@@ -79,6 +86,8 @@ class BoardRun:
         self.done = False
         self.last_data = None
         self.live_at = 0.0
+        self.cell = None            # the newest timestamp cell seen (pick_cells)
+        self.picks: deque = deque(maxlen=GRID_KEEP)     # (cell, trigger ID, timestamp, event bytes)
         self.history: deque = deque()       # (time, events, bytes), for the recent rates
         self.monitors: dict = {}
         self.wanted_monitors = None
@@ -146,6 +155,7 @@ class Run:
         self.live_dir = os.path.join(self.run_dir, "live")
         self.status_path = os.path.join(self.run_dir, "status.json")
         self._last_status = 0.0
+        self.set_cell = None            # the cell of the last live/combined.set
 
     # ---- output ----
     def log(self, text: str, level: str = "") -> None:
@@ -397,8 +407,9 @@ class Run:
             if len(data) == 0:
                 br.ended = "stop record"
                 break
+            offs: list = []
             try:
-                sc = rawdata.scan(data)
+                sc = rawdata.scan(data, offsets=offs)
             except rawdata.RawFormatError as err:
                 sc = None
                 if not br.format_warned:
@@ -425,6 +436,8 @@ class Run:
                         br.live_at = now
                         size = (w1 & 0xFFFFFFFF) * rawdata.WORD
                         self.write_live(br, bytes(data[sc.last_scope:sc.last_scope + size]))
+                if offs:
+                    self.pick_cells(br, data, offs)
                 for _, sp in sc.specials:
                     if sp["kind"] == "start":
                         br.start_record = sp
@@ -451,12 +464,53 @@ class Run:
         except OSError:
             pass
 
+    def pick_cells(self, br: BoardRun, data, offs: list) -> None:
+        """Keep the first event of every new timestamp cell (2**GRID_SHIFT ticks). Boards that share the clock
+        (a clock chain) and the trigger keep the same triggers, so write_set can show one moment on all."""
+        (w2,) = struct.unpack_from(">Q", data, offs[-1] + rawdata.WORD)
+        if br.cell is not None and (w2 & TS_MASK) >> GRID_SHIFT == br.cell:
+            return                              # no new cell in this buffer: the usual case, and cheap
+        words = np.frombuffer(data, dtype=">u8", count=len(data) // rawdata.WORD)
+        idx = np.asarray(offs, dtype=np.int64) // rawdata.WORD
+        cells = ((words[idx + 1] & np.uint64(TS_MASK)) >> np.uint64(GRID_SHIFT)).astype(np.int64)
+        before = np.concatenate(([-1 if br.cell is None else br.cell], cells[:-1]))
+        for i in np.nonzero(cells > before)[0][-GRID_KEEP:]:
+            o = offs[int(i)]
+            w1 = int(words[idx[i]])
+            size = (w1 & 0xFFFFFFFF) * rawdata.WORD
+            pick = (int(cells[i]), (w1 >> 32) & 0xFFFFFF, int(words[idx[i] + 1]) & TS_MASK, bytes(data[o:o + size]))
+            with br.lock:
+                br.picks.append(pick)
+        br.cell = max(int(cells[-1]), br.cell if br.cell is not None else -1)
+
+    def write_set(self) -> None:
+        """live/combined.set: the newest cell that every board kept, one event of each (rawdata.pack_set)."""
+        picks = []
+        for b in self.boards:
+            with b.lock:
+                picks.append({p[0]: p for p in b.picks})
+        common = set(picks[0]).intersection(*picks[1:]) if picks else set()
+        if not common or max(common) == self.set_cell:
+            return
+        cell = self.set_cell = max(common)
+        chosen = [d[cell] for d in picks]
+        info = {"cell": cell, "chained": self.chained, "sync": self.cfg.run.sync, "time": time.time(),
+                "boards": [{"name": b.name, "trigger_id": p[1], "timestamp": p[2], "size": len(p[3])}
+                           for b, p in zip(self.boards, chosen)]}
+        path = os.path.join(self.live_dir, "combined.set")
+        try:
+            with open(f"{path}.part", "wb") as f:
+                f.write(rawdata.pack_set(info, [p[3] for p in chosen]))
+            os.replace(f"{path}.part", path)
+        except OSError:
+            pass
+
     def take_data(self) -> None:
         cfg = self.cfg
         targets = C.software_targets(cfg)
         period = 1.0 / cfg.trigger.software_rate_hz if targets else None
         next_sw = time.monotonic() + (period or 0)
-        next_monitor = 0.0
+        next_monitor = next_set = 0.0
         while not self.stop_reason:
             now = time.monotonic()
             if self.stop_requested:
@@ -487,6 +541,9 @@ class Run:
                         from alab_daq.daq.boards import MONITORS
                         b.wanted_monitors = dict(MONITORS)
                     b.monitors = monitors(b.board, b.wanted_monitors)
+            if now >= next_set:
+                next_set = now + SET_S
+                self.write_set()
             for b in self.boards:
                 if not b.warned_silent and b.last_data is None and now - self.mono_start > SILENT_WARN_S:
                     b.warned_silent = True
@@ -514,6 +571,7 @@ class Run:
             while b.thread is not None and b.thread.is_alive():
                 b.thread.join(0.2)
                 self.status()
+        self.write_set()                        # the last moment all boards have
         for b in self.boards:
             if b.ended == "time-out" and b.bytes == 0:
                 self.log(f"{b.name} sent no data in this run: it did not start. Was it armed, and (in a chain) is its "

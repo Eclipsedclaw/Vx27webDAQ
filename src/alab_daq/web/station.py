@@ -50,7 +50,11 @@ class Station:
         self.cfg, self.cfg_path, self.run_note = C.lab_setup(), "", ""
         self.cfg_dirty, self.cfg_version = False, 0
         if not self._load_draft() and self.settings.config_file:
-            self._open_config(self.settings.config_file, quiet=True)
+            path = os.path.expanduser(self.settings.config_file)
+            if os.path.exists(path):
+                self._open_config(path, quiet=True)
+            else:                   # not made yet (a new computer): the lab's setup, which Save writes there
+                self.cfg_path, self.cfg_dirty = path, True
         self.runs = RunManager(self)
         self.converter = RootConverter(self)
         self.boards = BoardCheck(self)
