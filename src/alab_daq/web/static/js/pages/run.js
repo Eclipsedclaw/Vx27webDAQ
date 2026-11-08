@@ -373,6 +373,14 @@ export function runPage(root, app) {
     try { await post("/api/boards/check"); } catch (err) { fail(err); }
   }
 
+  // the simulator is on: say so plainly before a run starts, and how to use the real cards instead
+  function simulatorWarning() {
+    return h("div.notice.warn.sim-warn", icon("alert"), h("div.stack", { style: "gap:4px" },
+      h("b", t("The simulator is ON: this run uses simulated boards, not your CAEN cards.")),
+      h("span", t("Nothing is read from the real boards: the data are made up, and they stay in the run folder (not in the data folder).")),
+      h("span", t("To use the real cards: Settings (at the top of the page) → simulator → switch off “use simulated boards instead of the real ones (no hardware)” → Save settings; then Check boards."))));
+  }
+
   async function startRun() {
     let p;
     try { p = await get("/api/run/preview"); } catch (err) { fail(err); return; }
@@ -393,15 +401,21 @@ export function runPage(root, app) {
       p.free_bytes !== null ? [h("dt", t("Free there")), h("dd", fmtBytes(p.free_bytes))] : null);
     const noteBox = h("textarea.input.note-input", { rows: "3", maxlength: "4000", "aria-label": t("Note for this run") });
     noteBox.value = app.state.config.note || "";
-    const lines = [facts,
+    const lines = [p.simulator ? simulatorWarning() : null, facts,
       h("div.field", h("label", t("Note for this run: kept with its configuration, in the run folder, in each data file and next to it")), noteBox),
-      p.simulator ? h("div.notice.info", icon("info"), t("SIMULATOR: no hardware is used")) : null,
       p.need_bytes && p.free_bytes !== null && p.free_bytes < p.need_bytes
         ? h("div.notice.warn", icon("alert"), t("WARNING: about {gb} GB are needed", { gb: (p.need_bytes / 1e9).toFixed(1) })) : null,
       p.converting ? h("div.notice", icon("info"), t("The ROOT conversion of the last run goes on during this run ({n} file(s) left).", { n: p.converting })) : null,
       ...p.warnings.map((w) => h("div.notice.warn", icon("alert"), `${w.where}: ${w.message}`))];
-    const what = p.duration ? t("Start a run of {t} on {n} boards?", { t: fmtDuration(p.duration), n: p.boards }) : t("Start a run on {n} boards (until Stop)?", { n: p.boards });
-    if (!(await confirmDialog(what, lines, t("Start run")))) return;
+    const what = p.simulator
+      ? (p.duration ? t("Start a SIMULATED run of {t} on {n} boards?", { t: fmtDuration(p.duration), n: p.boards }) : t("Start a SIMULATED run on {n} boards (until Stop)?", { n: p.boards }))
+      : (p.duration ? t("Start a run of {t} on {n} boards?", { t: fmtDuration(p.duration), n: p.boards }) : t("Start a run on {n} boards (until Stop)?", { n: p.boards }));
+    const choice = await dialog({ title: what, body: h("div.stack", lines.filter(Boolean)),
+                                  actions: [{ label: t("Cancel"), value: false },
+                                            p.simulator ? { label: t("Open Settings"), icon: "gear", value: "settings" } : null,
+                                            { label: p.simulator ? t("Start simulated run") : t("Start run"), kind: "primary", value: true }].filter(Boolean) });
+    if (choice === "settings") { location.hash = "#settings"; return; }
+    if (choice !== true) return;
     try {
       await post("/api/run/start", { note: noteBox.value });
       toast(t("Run started"), "ok");
@@ -465,6 +479,7 @@ export function runPage(root, app) {
     }
     function spec() { return { ...st, values: st.values }; }
     const body = h("div.stack",
+      app.state.settings.values.use_simulator ? simulatorWarning() : null,
       h("p.hint", { style: "margin:0" }, t("Runs of the configuration one after the other, each stopping at its run time; every run gets its own files and a note that names the step. The configuration being edited is not changed.")),
       h("div.row", kindSeg, h("span.label", t("each run")), num("duration_s", 1, 604800), h("span.text2", t("s"))),
       repeatBox, scanBox,

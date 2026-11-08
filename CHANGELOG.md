@@ -5,6 +5,10 @@ What changed in each version of ALAB DAQ. Write the notes of the next version un
 
 ## Unreleased
 
+## v0.0.16 (2026-11-08)
+
+- With the simulator on, Start run (and a sequence) warns plainly that simulated boards are used, not the CAEN cards, says how to switch it off (Settings → simulator → Save settings) and offers Open Settings; the start button reads Start simulated run.
+
 ## v0.0.15 (2026-11-08)
 
 - Trigger panel on the Configuration page (WaveDump2's style): on every board that triggers on its own channels, the mask as channel buttons (Select all, None, Read out only) and every channel's threshold in a grid with "same for all"; it and the Channels table edit the same values and follow each other.
