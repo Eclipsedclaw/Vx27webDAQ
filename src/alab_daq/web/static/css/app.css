@@ -370,7 +370,10 @@ textarea.input.note-input { width: 100%; min-height: 64px; font-family: var(--fo
               padding: 12px; }
 .plot { width: 100%; height: 100%; }
 .u-select { background: var(--accent-soft) !important; border-left: 1px solid var(--accent); border-right: 1px solid var(--accent); }
-.u-cursor-x { border-right: 1px solid var(--text-2) !important; }
+.u-cursor-x { border-right: 1px dashed var(--text-2) !important; }
+.cur-label { position: absolute; top: 2px; z-index: 5; pointer-events: none; padding: 1px 6px; border-radius: 4px; white-space: nowrap;
+             font-size: 11px; font-variant-numeric: tabular-nums; background: var(--surface); color: var(--text);
+             border: 1px solid var(--border-strong); box-shadow: var(--shadow); }
 .u-cursor-y { display: none; }
 
 /* ---- Tools page: every tool a section that opens and closes ---- */
@@ -585,3 +588,46 @@ details.explain p { margin: 6px 0 0; font-size: 12.5px; color: var(--text-2); li
 .seq-list { max-height: 220px; overflow: auto; }
 .seq-list ol { margin: 4px 0 0 18px; padding: 0; }
 .seq-field { min-width: 0; }
+.ch-range { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 0 10px 6px 12px; font-size: 12px; }
+.ch-range .seg button { padding: 2px 8px; font-size: 12px; }
+
+/* ---- the Run page's right column: tabs Plot | Progress | Setup; the plot controls stacked ---- */
+.side-tabs > .card-head { padding: 8px 12px; }
+.tab-panel { min-width: 0; }
+.plot-controls, .comb-controls { display: flex; flex-direction: column; gap: 12px; }
+.plot-controls .ctl-stack { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+.plot-controls .group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.plot-controls .group > .label { min-width: 74px; }
+.plot-controls .ctl-buttons { gap: 8px; }
+.plot-controls .chan-box { padding: 8px; }
+.plot-controls .chan-grid { grid-template-columns: repeat(8, minmax(30px, 1fr)); }
+.plot-controls .comb-chips { width: 100%; }
+.plot-controls .seg { flex-wrap: wrap; }
+.wave-panel > .wave-sub { padding-top: 2px; }
+
+/* ---- the Setup panel: the boards and their cables ---- */
+.setup-view { display: flex; flex-direction: column; gap: 8px; }
+.setup-svg svg { display: block; width: 100%; height: auto; }
+.setup-foot { color: var(--text-2); display: flex; flex-direction: column; gap: 2px; }
+.sv-box { fill: var(--surface-2); stroke: var(--border-strong); stroke-width: 1; }
+.sv-box.sv-master { stroke: var(--accent); stroke-width: 1.6; }
+.sv-box.sv-bad { stroke: var(--critical); stroke-width: 1.6; }
+.sv-ext { fill: var(--surface); stroke: var(--border-strong); stroke-dasharray: 4 3; }
+.sv-t { fill: var(--text); font: 12px system-ui, sans-serif; }
+.sv-name { font-weight: 650; font-size: 13px; }
+.sv-small { font-size: 11px; }
+.sv-dim { fill: var(--text-2); }
+.sv-accent { fill: var(--accent-strong); font-weight: 650; }
+.sv-role { font-size: 11.5px; }
+.sv-clk { stroke: var(--accent); stroke-width: 1.8; fill: none; }
+.sv-trg { stroke: var(--warning-text); stroke-width: 1.8; fill: none; }
+.sv-gpio { stroke: var(--muted); stroke-width: 1.4; stroke-dasharray: 3 3; fill: none; }
+.sv-head-clk { fill: var(--accent); }
+.sv-head-trg { fill: var(--warning-text); }
+.sv-head-gpio { fill: var(--muted); }
+.sv-led { fill: var(--border-strong); }
+.sv-led-running { fill: var(--good, #2e9d57); }
+.sv-led-error { fill: var(--critical); }
+.sv-led-stopped { fill: var(--muted); }
+.input.input-sm { height: 26px; padding: 0 6px; font-size: 12px; }
+.ch-range .input.num { height: 26px; font-size: 12px; }

@@ -39,6 +39,7 @@ class ServerSettings:
     caen_lib_dir: str = str(PROJECT / "caen" / "lib")      # libCAEN_FELib.so and libCAEN_Dig2.so (caen_libs.sh)
     use_simulator: bool = False
     simulator_options: str = "--rate 20"
+    simulator_pulses: str = ""      # "": random hits; staircase / train: the simulator's pulse generator
     runs_dir: str = ""              # run records and users' outputs; empty: ~/ALAB_DAQ_runs
     data_dirs: list[str] = field(default_factory=lambda: [DEFAULT_DATA_DIR])  # more folders of data files to open
     convert_to_root: bool = True    # after every run, its .raw files are converted to .root
@@ -49,6 +50,11 @@ class ServerSettings:
     def runs_folder(self) -> str:
         """The save folder: a relative path counts from the home folder of the service account."""
         return os.path.join(os.path.expanduser("~"), os.path.expanduser(self.runs_dir.strip()) or DEFAULT_RUNS)
+
+    def sim_options(self) -> str:
+        """The simulator's options for a run: the ones given, and the pulse generator chosen."""
+        extra = f" --generator {self.simulator_pulses}" if self.simulator_pulses else ""
+        return (self.simulator_options or "") + extra
 
     def lib_env(self) -> dict:
         """The environment for programs that use CAEN FELib: its folder first on LD_LIBRARY_PATH."""
@@ -62,8 +68,11 @@ class ServerSettings:
 
 # what each setting is, for the Settings page; "admin": only admins may change it
 SETTING_KINDS = {"config_file": "file", "caen_lib_dir": "folder", "runs_dir": "folder", "data_dirs": "folders",
-                 "use_simulator": "bool", "simulator_options": "text", "convert_to_root": "bool", "build_events": "bool", "refresh_ms": "int",
+                 "use_simulator": "bool", "simulator_options": "text", "simulator_pulses": "choice", "convert_to_root": "bool", "build_events": "bool", "refresh_ms": "int",
                  "guests": "admin"}
+
+
+SETTING_CHOICES = {"simulator_pulses": ["", "staircase", "train"]}
 
 
 def settings_path() -> Path:
@@ -89,6 +98,10 @@ def coerce(name: str, value, default):
         if isinstance(value, str):
             value = [line for line in value.splitlines()]
         return [str(v).strip() for v in value if str(v).strip()]
+    if name in SETTING_CHOICES:
+        if str(value) not in SETTING_CHOICES[name]:
+            raise ValueError(f"{name} is one of {', '.join(repr(c) for c in SETTING_CHOICES[name])}")
+        return str(value)
     if name == "simulator_options":
         from alab_daq.daq.sim import parse_options
         parse_options(str(value))           # ValueError for options the simulator does not take

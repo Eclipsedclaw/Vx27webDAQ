@@ -10,6 +10,7 @@ const FIELDS = [
   ["runs_dir", T("save folder (run records and users' outputs)"), "folder"],
   ["data_dirs", T("more data folders users may open (one per line)"), "folders"],
   ["use_simulator", T("simulator"), "bool"], ["simulator_options", T("simulator options"), "text"],
+  ["simulator_pulses", T("simulated signal"), "choice"],
   ["convert_to_root", T("Convert to ROOT after the run"), "bool"],
   ["build_events", T("After a run of several boards: one ROOT file of every board per trigger (RUN_built.root)"), "bool"],
   ["refresh_ms", T("refresh (ms)"), "int"],
@@ -29,8 +30,18 @@ export function settingsPage(root, app) {
   function control(key, kind) {
     const v = values[key];
     const mark = (val) => { changes[key] = val; saveBtn.disabled = false; };
+    if (kind === "choice") {
+      const names = { "": t("random hits (the simulator options)"), staircase: t("pulse generator: staircase (channel k at k × 1 µs)"),
+                      train: t("pulse generator: a train (a pulse every 1 µs on every channel)") };
+      const el = h("select.input", { disabled: !can, onchange: () => mark(el.value) },
+                   ((app.state.settings.choices || {})[key] || []).map((c) => h("option", { value: c }, names[c] || c)));
+      el.value = String(v ?? "");
+      return el;
+    }
     if (kind === "bool") {
-      const label = key === "use_simulator" ? t("use simulated boards instead of the real ones (no hardware)") : t("after every run, its .raw files become .root files");
+      const label = { use_simulator: t("use simulated boards instead of the real ones (no hardware)"),
+                      build_events: t("also RUN_built.root: every board's event per trigger, in one file") }[key]
+                    || t("after every run, its .raw files become .root files");
       return toggle(label, Boolean(v), (on) => mark(on), { disabled: !can });
     }
     if (kind === "folders") {
@@ -59,7 +70,8 @@ export function settingsPage(root, app) {
 
   function hints(key) {
     if (key === "runs_dir") grid.append(h("span.hint.hint-cell", t("Every run gets a folder here (configuration, DAQ log, status, run.json); users' conversions go to users/<name>/.")));
-    if (key === "simulator_options") grid.append(h("span.hint.hint-cell", t("--rate HZ: hits per second; --share P: the part of the channels a hit reaches; --amplitude COUNTS; --noise SIGMA; --seed N; --fail open:NAME, param:NAME:PARAM, read:NAME:N, nostop:NAME or unarmed:NAME imitates a failure of board NAME")));
+    if (key === "simulator_options") grid.append(h("span.hint.hint-cell", t("--rate HZ: hits per second; --share P: the part of the channels a hit reaches; --amplitude COUNTS; --noise SIGMA; --seed N; --spacing-us US: the pulse generator's spacing (1 µs); --fail open:NAME, param:NAME:PARAM, read:NAME:N, nostop:NAME or unarmed:NAME imitates a failure of board NAME")));
+    if (key === "simulator_pulses") grid.append(h("span.hint.hint-cell", t("the pulse generator: every channel of every board gets a full pulse at each hit (--rate a second, at regular times), negative on a VX2730 and positive on a VX2740, so the waveforms are easy to read; the boards line up in the combined view")));
     if (key === "caen_lib_dir") {
       const libs = app.state.settings.caen_libs || {};
       grid.append(h("span.hint.hint-cell", Object.entries(libs).map(([name, ok]) => [chip(`${name} ${ok ? t("found") : t("missing")}`, ok ? "good" : "warning", ok ? "check" : "alert"), " "]),

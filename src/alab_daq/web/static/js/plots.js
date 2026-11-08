@@ -69,7 +69,8 @@ export class WavePlot {
   // The x axis has two lines: the sample, and its time from the trigger (the pre-trigger sample of the settings
   // the data were taken with), or from the first sample when those settings are not known. setBoard() gives the
   // board's sample time and ADC range.
-  constructor(el, { onZoom, onMeasure, onWheel, onReset, readout } = {}) {
+  constructor(el, { onZoom, onMeasure, onWheel, onReset, readout, sync } = {}) {
+    this.sync = sync || null;       // plots with the same key share the cursor: one dashed line on all of them
     this.el = el;
     this.onZoom = onZoom;
     this.onMeasure = onMeasure;
@@ -108,7 +109,8 @@ export class WavePlot {
       },
       padding: [18, 12, 0, 0],            // room above the plot for the trigger line's label
       series: [{}, { stroke: accent, width: 1.25, points: { show: false } }],
-      cursor: { drag: { x: true, y: false, setScale: false }, points: { show: false }, bind: { dblclick: () => null } },
+      cursor: { drag: { x: true, y: false, setScale: false }, points: { show: false }, bind: { dblclick: () => null },
+                ...(this.sync ? { sync: { key: this.sync, setSeries: false } } : {}) },
       hooks: {
         drawClear: [(u) => { self.drawMissing(u, shade); self.drawSpan(u, ink); }],
         draw: [(u) => self.drawLines(u, ink)],
@@ -134,6 +136,8 @@ export class WavePlot {
     this.u.over.addEventListener("dblclick", () => this.resetZoom(true));
     this.u.over.addEventListener("mouseleave", () => this.readout && setText(this.readout, ""));
     this.u.over.addEventListener("wheel", (e) => this.wheel(e), { passive: false });
+    this.curLabel = h("div.cur-label.hidden");          // the dashed cursor line's label: sample and time
+    this.u.over.appendChild(this.curLabel);
   }
 
   // the mouse wheel zooms the time axis around the pointer (all plots: the panel sets the same window on each)
@@ -288,6 +292,7 @@ export class WavePlot {
   }
 
   moved(u) {
+    this.label(u);
     if (!this.readout) return;
     const i = u.cursor.idx;
     if (i === null || i === undefined || !this.data[0].length) { setText(this.readout, ""); return; }
@@ -295,6 +300,17 @@ export class WavePlot {
     const y = this.mv() ? `${this.data[1][i].toFixed(2)} mV` : String(Math.round(this.data[1][i]));
     clear(this.readout, h("span.rd-long", this.mv() ? t("sample {x} · {time} · {y}", { x, time, y }) : t("sample {x} · {time} · ADC {y}", { x, time, y })),     // a narrow plot: the short one
           h("span.rd-short", `${x} · ${time} · ${y}`));
+  }
+
+  // the label at the cursor line (on every plot of the sync group): the sample and its time from the trigger
+  label(u) {
+    const left = u.cursor.left;
+    if (left === null || left === undefined || left < 0 || !this.data[0].length) { this.curLabel.classList.add("hidden"); return; }
+    const x = Math.round(u.posToVal(left, "x"));
+    setText(this.curLabel, t("sample {n} · {time}", { n: x, time: fmtTime((x - (this.t0 ?? 0)) * this.sampleNs) }));
+    this.curLabel.classList.remove("hidden");
+    const w = this.curLabel.offsetWidth, room = u.over.clientWidth;
+    this.curLabel.style.left = `${Math.max(0, Math.min(room - w, left - w / 2))}px`;
   }
 
   resetZoom(tell) {

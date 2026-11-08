@@ -40,14 +40,18 @@ export function combinedView(app, { getSource }) {
   let yunit = YUNITS.some(([k]) => k === store("comb.y")) ? store("comb.y") : "mv";
   let align = store("comb.align") === "timestamp" ? "timestamp" : "trigger";
   let zoom = null, eventNo = 0, events = 0, available = [], view = null, active = false;
+  let sref = store("comb.sref") || "";                // the board whose sample numbers the time axis shows
+  let yr = { mode: "auto", lo: -10, hi: 10, half: 10 };
+  try { yr = { ...yr, ...(JSON.parse(store("comb.yrange") || "null") || {}) }; } catch (e) { /* the defaults */ }
   let adderBoard = store("comb.adder") || "";
 
-  const el = h("div.comb.hidden");
+  const el = h("div.comb.hidden");                 // the plot (the main part of the page)
+  const controls = h("div.comb-controls.hidden");  // its controls (the Run page's Plot tab)
   const chips = h("div.row.wrap.comb-chips");
   const addBtn = h("button.btn.btn-sm", { type: "button", onclick: () => toggleAdder(), "aria-expanded": "false",
                                           title: t("Choose the channels of each board to put in this plot (at most 16 in all)") },
                    icon("plus"), t("Channels…"));
-  const ySeg = segmented(YUNITS.map(([k, v]) => [k, t(v)]), yunit, (v) => { yunit = v; store("comb.y", v); load(true); }, { label: t("Y axis") });
+  const ySeg = segmented(YUNITS.map(([k, v]) => [k, t(v)]), yunit, (v) => { yunit = v; store("comb.y", v); showYr(); load(true); }, { label: t("Y axis") });
   ySeg.title = t("mV: each channel minus its baseline (the mean of its first 16 samples), in mV of its board's input range (2 Vpp: a VX2730 count is 0.122 mV, a VX2740 count 0.031 mV). ADC: the same in counts. Raw: the counts as recorded");
   const aSeg = segmented(ALIGNS.map(([k, v]) => [k, t(v)]), align, (v) => { align = v; store("comb.align", v); zoom = null; load(true); }, { label: t("Time 0") });
   aSeg.title = t("Each board's trigger at time 0, or the boards placed by their timestamps against the first board: the same moment lines up (with the clock chain)");
@@ -57,6 +61,16 @@ export function combinedView(app, { getSource }) {
                     h("div.stepper", h("button.btn.btn-sm.btn-icon", { type: "button", "aria-label": t("Previous event"), onclick: () => setEvent(eventNo - 1) }, icon("left")),
                       evInput, h("button.btn.btn-sm.btn-icon", { type: "button", "aria-label": t("Next event"), onclick: () => setEvent(eventNo + 1) }, icon("right"))),
                     evCount);
+  // the y range: fitted, from–to, or ± N around the baselines (in the unit of the y axis)
+  const yrSeg = segmented([["auto", t("Auto")], ["custom", t("from–to")], ["half", "± N"]], yr.mode, (v) => setYr({ mode: v }), { label: t("Y range") });
+  yrSeg.title = t("The y axis: fitted to the traces, a range you type, or ± N around the baselines (not for raw ADC)");
+  const yrLo = h("input.input.num", { type: "number", step: "any", value: String(yr.lo), style: "width:90px", "aria-label": t("from"), onchange: () => setYr({ lo: Number(yrLo.value) }) });
+  const yrHi = h("input.input.num", { type: "number", step: "any", value: String(yr.hi), style: "width:90px", "aria-label": t("to"), onchange: () => setYr({ hi: Number(yrHi.value) }) });
+  const yrHalf = h("input.input.num", { type: "number", step: "any", min: "0", value: String(yr.half), style: "width:80px", "aria-label": "± N", onchange: () => setYr({ half: Number(yrHalf.value) }) });
+  const yrCustom = h("div.group", yrLo, h("span.text2", "–"), yrHi);
+  const yrHalfBox = h("div.group", h("span.text2", "±"), yrHalf);
+  const srefSel = h("select.input", { "aria-label": t("sample numbers of"), title: t("The time axis also gives the sample numbers of this board"),
+                                     onchange: () => { sref = srefSel.value; store("comb.sref", sref); build(); } });
   const resetBtn = h("button.btn.btn-sm", { type: "button", onclick: () => { zoom = null; load(true); }, title: t("The whole time window of every board again") },
                      icon("reset"), t("Reset zoom"));
   const adderSel = h("select.input", { "aria-label": t("Board"), onchange: () => { adderBoard = adderSel.value; store("comb.adder", adderBoard); fillAdder(); } });
@@ -67,11 +81,13 @@ export function combinedView(app, { getSource }) {
   const plotEl = h("div.plot.comb-plot");
   const empty = h("div.wave-empty.hidden");
   const readout = h("div.row.wrap.comb-read");
-  el.append(h("div.toolbar.two-rows",
-              h("div.toolbar-row", h("span.label", t("In the plot")), chips, addBtn),
-              h("div.toolbar-row", h("div.group", h("span.label", t("Y axis")), ySeg), h("div.group", h("span.label", t("Time 0")), aSeg),
-                evGroup, h("span.spacer"), resetBtn)),
-            adder, info, h("div.comb-body", h("div.wave-plot", plotEl, empty)), readout);
+  controls.append(h("div.ctl-stack", h("div.group", h("span.label", t("In the plot")), addBtn), chips),
+                  adder,
+                  h("div.ctl-stack", h("div.group", h("span.label", t("Y axis")), ySeg),
+                    h("div.group", h("span.label", t("Y range")), yrSeg, yrCustom, yrHalfBox),
+                    h("div.group", h("span.label", t("Time 0")), aSeg), h("div.group", h("span.label", t("samples of")), srefSel),
+                    evGroup, h("div.row.wrap.ctl-buttons", resetBtn)));
+  el.append(info, h("div.comb-body", h("div.wave-plot", plotEl, empty)), readout);
 
   // ---- the traces ----
   function boardsList() {
@@ -133,7 +149,7 @@ export function combinedView(app, { getSource }) {
   }
 
   // ---- the plot ----
-  let u = null, data = [[]], series = [], lines = [], builtSig = "";
+  let u = null, data = [[]], series = [], lines = [], builtSig = "", curLabel = null;
   function build() {
     if (u) u.destroy();
     const grid = css("--grid"), axis = css("--axis"), text2 = css("--text-2");
@@ -143,13 +159,18 @@ export function combinedView(app, { getSource }) {
       width: Math.max(200, plotEl.clientWidth), height: Math.max(160, plotEl.clientHeight),
       padding: [18, 12, 0, 0], legend: { show: false },
       scales: { x: { time: false, range: (_, min, max) => xRange(min, max) }, y: { range: (_, min, max) => yRange(min, max) } },
-      axes: [{ ...axisStyle, size: 34, label: "µs",
-               values: (_, vals) => { const d = vals.length > 1 ? decimals(Math.abs(vals[1] - vals[0])) : 0; return vals.map((v) => v.toFixed(d).replace(/^-/, "−")); } },
+      axes: [{ ...axisStyle, size: 46, label: refBoard() ? t("µs · sample of {b}", { b: refBoard().name }) : "µs",
+               values: (_, vals) => {                    // the time, and under it the sample of the board chosen
+                 const d = vals.length > 1 ? decimals(Math.abs(vals[1] - vals[0])) : 0, b = refBoard();
+                 return vals.map((v) => v.toFixed(d).replace(/^-/, "−") + (b ? `\n${sampleOf(b, v * 1000)}` : ""));
+               } },
              { ...axisStyle, size: 60, label: t(Y_LABEL[yunit]) }],
       series: [{}, ...series.map((s) => ({ stroke: s.color, width: 1.25, spanGaps: true, points: { show: false } }))],
       cursor: { drag: { x: true, y: false, setScale: false }, points: { show: false } },
       hooks: { draw: [drawLines], setSelect: [selected], setCursor: [moved] },
     }, data, plotEl);
+    curLabel = h("div.cur-label.hidden");
+    u.over.appendChild(curLabel);
     u.over.addEventListener("dblclick", () => { zoom = null; load(true); });
     u.over.addEventListener("mouseleave", () => showReadout(null));
   }
@@ -160,7 +181,33 @@ export function combinedView(app, { getSource }) {
     return r && r[1] > r[0] ? [r[0] / 1000, r[1] / 1000] : [Number.isFinite(min) ? min : 0, Number.isFinite(max) ? max : 1];
   }
 
+  // the board whose sample numbers are shown, and the sample of a time (ns) on it
+  function refBoard() {
+    const list = ((view && view.boards) || []).filter((b) => b.present);
+    return list.find((b) => b.name === sref) || list[0] || null;
+  }
+
+  function sampleOf(b, ns) { return Math.round((ns - (b.shift_ns || 0)) / b.sample_ns + (b.pre_trigger || 0)); }
+
+  function setYr(change) {
+    yr = { ...yr, ...change };
+    if (yr.hi <= yr.lo) yr.hi = yr.lo + 1;
+    store("comb.yrange", JSON.stringify(yr));
+    showYr();
+    if (u) u.setData(data, true);
+  }
+
+  function showYr() {
+    if (yunit === "raw" && yr.mode === "half") yr.mode = "auto";       // raw traces sit at different baselines
+    yrSeg.set(yr.mode);
+    yrCustom.classList.toggle("hidden", yr.mode !== "custom");
+    yrHalfBox.classList.toggle("hidden", yr.mode !== "half");
+    yrLo.value = String(yr.lo); yrHi.value = String(yr.hi); yrHalf.value = String(yr.half);
+  }
+
   function yRange(min, max) {
+    if (yr.mode === "custom") return [yr.lo, yr.hi];
+    if (yr.mode === "half" && yunit !== "raw") return [-Math.abs(yr.half), Math.abs(yr.half)];
     if (!Number.isFinite(min) || !Number.isFinite(max)) return [-1, 1];
     const pad = Math.max((max - min) * 0.08, yunit === "mv" ? 0.05 : 2);
     return [min - pad, max + pad];
@@ -210,8 +257,15 @@ export function combinedView(app, { getSource }) {
 
   function moved(uu) {
     const left = uu.cursor.left;
-    if (left === null || left === undefined || left < 0) { showReadout(null); return; }
-    showReadout(uu.posToVal(left, "x"));
+    if (left === null || left === undefined || left < 0) { showReadout(null); if (curLabel) curLabel.classList.add("hidden"); return; }
+    const x = uu.posToVal(left, "x"), b = refBoard();
+    showReadout(x);
+    if (curLabel) {                                       // the dashed line's label: the time, and the sample on the board chosen
+      setText(curLabel, fmtTime(x * 1000) + (b ? ` · ${t("sample {n} of {b}", { n: sampleOf(b, x * 1000), b: b.name })}` : ""));
+      curLabel.classList.remove("hidden");
+      const w = curLabel.offsetWidth, room = uu.over.clientWidth;
+      curLabel.style.left = `${Math.max(0, Math.min(room - w, left - w / 2))}px`;
+    }
   }
 
   function showReadout(x) {
@@ -224,8 +278,10 @@ export function combinedView(app, { getSource }) {
           ...lines.map((l) => {
             const k = nearest(l.xs, x);
             const v = k < 0 || Math.abs(l.xs[k] - x) > l.step * 1.5 ? null : l.ys[k];
+            const bd = ((view && view.boards) || []).find((b) => b.name === l.board);
             return h("span.comb-val", h("span.swatch", { style: `background:${l.color}` }), `${l.name} `,
-                     h("b.num", v === null ? "—" : `${fmtNum(v, yunit === "mv" ? 2 : yunit === "adc" ? 1 : 0)}${unit}`));
+                     h("b.num", v === null ? "—" : `${fmtNum(v, yunit === "mv" ? 2 : yunit === "adc" ? 1 : 0)}${unit}`),
+                     bd ? h("span.text2.num", ` · s ${fmtInt(sampleOf(bd, x * 1000))}`) : null);
           }));
   }
 
@@ -243,11 +299,16 @@ export function combinedView(app, { getSource }) {
       const n = x.y.length, xs = new Float64Array(n);
       if (x.mode === "raw") for (let k = 0; k < n; k++) xs[k] = (x.x0_ns + k * x.step_ns) / 1000;
       else for (let k = 0; k < n; k++) xs[k] = (x.x0_ns + (Math.floor(k / 2) + (k % 2 ? 0.75 : 0.25)) * x.step_ns) / 1000;
-      lines.push({ name: `${b}·ch${c}`, color: colorOf(i), xs, ys: x.y, step: x.step_ns / 1000 });
+      lines.push({ name: `${b}·ch${c}`, board: b, color: colorOf(i), xs, ys: x.y, step: x.step_ns / 1000 });
       series.push({ color: colorOf(i) });
     });
     data = lines.length ? uPlot.join(lines.map((l) => [l.xs, l.ys])) : [[]];
-    const sig = JSON.stringify([series.map((s) => s.color), yunit]);    // a new plot only for other traces or units:
+    const presentB = v.boards.filter((b) => b.present);
+    const keepRef = srefSel.value || sref;
+    clear(srefSel, presentB.map((b) => h("option", { value: b.name }, b.name)));
+    if (presentB.some((b) => b.name === keepRef)) srefSel.value = keepRef;
+    sref = srefSel.value || sref;
+    const sig = JSON.stringify([series.map((s) => s.color), yunit, refBoard() && refBoard().name]);    // a new plot only for other traces, units or sample board:
     if (!u || sig !== builtSig) { builtSig = sig; build(); }             // a live refresh must not end a drag
     else u.setData(data, true);
     const missing = traces.length && !lines.length;
@@ -327,14 +388,17 @@ export function combinedView(app, { getSource }) {
     }
   }
 
+  showYr();
   const ro = new ResizeObserver(() => { if (u && plotEl.clientWidth > 20 && plotEl.clientHeight > 20) u.setSize({ width: plotEl.clientWidth, height: plotEl.clientHeight }); });
   ro.observe(plotEl);
 
   return {
     el,
+    controls,
     setActive(on) {
       active = on;
       el.classList.toggle("hidden", !on);
+      controls.classList.toggle("hidden", !on);
       if (on) { requestAnimationFrame(() => load(true)); }
     },
     sourceChanged() { eventNo = 0; evInput.value = "0"; zoom = null; available = []; seq = null; load(true); },

@@ -5,6 +5,10 @@ What changed in each version of ALAB DAQ. Write the notes of the next version un
 
 ## Unreleased
 
+## v0.0.11 (2026-11-08)
+
+- Plots first, the boards' setup, and a pulse generator. The Run page gives the plots the left and puts their controls into the right column's tab **Plot**, beside **Progress** and the new **Setup** (setupview.js: the boards and their clock, trigger and GPIO cables drawn from the configuration's plans, with live state and sync offsets). Channel plots share one dashed cursor line labelled with sample and time, and each can have its own y range; the combined view gives sample numbers on its time axis, at its cursor and per trace, and has a y range (Auto, from–to, ± N). The simulator's pulse generator (Settings: simulated signal; `--generator staircase|train`, `--spacing-us`): regular hits, a full pulse on every channel, negative on a V2730 and positive on a V2740, channel k at k µs (staircase) or a pulse every µs (train). Fixed: the DAQ program's log lines could mix when board readers logged at once; the build-events toggle showed the wrong label.
+
 ## v0.0.10 (2026-11-08)
 
 - Run sequences (WaveDump2's settings scripts): N repeats, or a scan of every channel's threshold or DC offset (one board or all) or of any board parameter over a list of values, R runs each, every run a copy of the configuration with its step's change and a note naming it (`web/sequence.py`); a failed run stops it, Stop ends the run and the sequence; after a server restart a sequence is marked interrupted.

@@ -187,6 +187,7 @@ class Run:
         self.live_dir = os.path.join(self.run_dir, "live")
         self.status_path = os.path.join(self.run_dir, "status.json")
         self._last_status = 0.0
+        self._log_lock = threading.Lock()
         self.set_cell = None            # the cell of the last live/combined.set
         self.control_dir = os.path.join(self.run_dir, "control")
         self.changes: list[dict] = []   # what was changed during the run (poll_control)
@@ -196,7 +197,9 @@ class Run:
     # ---- output ----
     def log(self, text: str, level: str = "") -> None:
         prefix = {"error": "ERROR: ", "warning": "WARNING: "}.get(level, "")
-        print(f"{stamp()} {prefix}{text}", flush=True)
+        with self._log_lock:            # the reader threads log too: one whole line at a time (print writes the
+            sys.stdout.write(f"{stamp()} {prefix}{text}\n")     # text and the newline apart, so lines could mix)
+            sys.stdout.flush()
         if level == "error":
             self.errors.append(text)
         elif level == "warning":

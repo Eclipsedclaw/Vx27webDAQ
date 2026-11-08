@@ -31,7 +31,8 @@ function loadJSON(key, fallback) {
 
 // onBoard(name): called whenever the board shown changes (the Run page marks its row)
 export function wavePanel(app, { onBoard } = {}) {
-  const panel = h("section.wave-panel", { "aria-label": t("Waveforms") });
+  const panel = h("section.wave-panel", { "aria-label": t("Waveforms") });     // the plots (the main part of the page)
+  const controls = h("div.plot-controls", { "aria-label": t("Plot controls") });  // their controls (the Run page's Plot tab)
   const sub = h("div.wave-sub");
 
   // ---- what to show ----
@@ -126,19 +127,19 @@ export function wavePanel(app, { onBoard } = {}) {
   const rangeGroup = h("div.group", h("span.label", t("ADC range")), rangeSeg, customBox, halfBox);
   const linesGroup = h("div.group", h("span.label", t("Lines")), trigLineBtn, thrLineBtn);
   const mouseGroup = h("div.group", h("span.label", t("Mouse")), mouseSeg);
-  const howRow = h("div.toolbar-row",
+  const howRow = h("div.ctl-stack",
       h("div.group", h("span.label", t("Plot")), plotSeg), avgGroup, unitGroup, rangeGroup, linesGroup, mouseGroup,
-      h("span.spacer"), app.can("control") ? tuneBtn : null, restartBtn, resetBtn);
-  panel.appendChild(h("div.toolbar.two-rows",
-    h("div.toolbar-row",
-      h("h2.card-title", t("Waveforms")), viewSeg,
-      h("div.group", sourceSeg, fileName, openBtn), boardGroup, chanGroup,
-      evGroup, h("span.spacer"), pauseBtn, allBtn),
-    howRow));
-  panel.appendChild(pickBox);
-  panel.appendChild(tuneBox);
-  panel.appendChild(sub);
+      h("div.row.wrap.ctl-buttons", app.can("control") ? tuneBtn : null, restartBtn, resetBtn));
   const combo = combinedView(app, { getSource: () => ({ source, file }) });
+  controls.append(
+    h("div.ctl-stack",
+      h("div.group", h("span.label", t("View")), viewSeg),
+      h("div.group", h("span.label", t("Source")), sourceSeg, openBtn), fileName,
+      boardGroup, chanGroup),
+    pickBox,
+    h("div.ctl-stack", evGroup, h("div.row.wrap.ctl-buttons", pauseBtn, allBtn)),
+    howRow, tuneBox, combo.controls);
+  panel.appendChild(sub);
 
   // ---- the plots, and the measurement under them ----
   const wrap = h("div.wave-wrap");
@@ -172,11 +173,15 @@ export function wavePanel(app, { onBoard } = {}) {
     const expand = h("button.btn.btn-ghost.btn-sm.btn-icon", { type: "button", "aria-label": t("This channel alone"),
                                                                title: t("This channel alone, or all channels again"),
                                                                onclick: () => enlarge(enlarged === k ? null : k) }, icon("expand"));
+    const ybtn = h("button.btn.btn-ghost.btn-sm.btn-icon", { type: "button", "aria-label": t("This channel's y range"),
+                                                             title: t("This channel's own y range (else the panel's)"), onclick: () => toggleCardRange(k) }, icon("sliders"));
+    const rangeRow = h("div.ch-range.hidden");
     const plotEl = h("div.plot"), xyEl = h("div.plot.hidden"), empty = h("div.wave-empty.hidden");
-    const card = h("div.wave", h("div.wave-head", title, meta, warn, read, expand), h("div.wave-plot", plotEl, xyEl, empty));
+    const card = h("div.wave", h("div.wave-head", title, meta, warn, read, ybtn, expand), rangeRow, h("div.wave-plot", plotEl, xyEl, empty));
     grid.appendChild(card);
     const plot = new WavePlot(plotEl, { readout: read, onZoom: (x0, x1) => zoomAll(x0, x1), onMeasure: (x0, x1) => setSpan([x0, x1]),
-                                        onWheel: (x0, x1) => wheelZoom(x0, x1), onReset: () => { resetZoom(); load(true); } });
+                                        onWheel: (x0, x1) => wheelZoom(x0, x1), onReset: () => { resetZoom(); load(true); },
+                                        sync: "alab-wave" });      // one dashed cursor line on every channel plot
     plot.setRange(range);
     plot.setShow(lines);
     plot.setMouse(mouse);
@@ -184,7 +189,7 @@ export function wavePanel(app, { onBoard } = {}) {
     const row = h("tr", cells);
     measureRows.appendChild(row);
     plot.setUnit(yUnit, mvPerAdc);
-    cards.push({ card, title, meta, warn, read, plot, empty, expand, row, cells, ch: null, plotEl, xyEl, xy: null,
+    cards.push({ card, title, meta, warn, read, plot, empty, expand, row, cells, ch: null, plotEl, xyEl, xy: null, ybtn, rangeRow,
                  ring: new Ring(avgN), hist: new SampleHistogram(), accCh: null });
   }
   let lastBins = 0;
@@ -293,12 +298,58 @@ export function wavePanel(app, { onBoard } = {}) {
   function showCards() {
     const chans = channelsShown();
     cards.forEach((x, k) => {
+      if (x.ch !== (k < chans.length ? chans[k] : null)) x.rangeRow.classList.add("hidden");
       x.ch = k < chans.length ? chans[k] : null;
       const shown = x.ch !== null && (enlarged === null || enlarged === k);
       x.card.classList.toggle("hidden", !shown);
       x.row.classList.toggle("hidden", x.ch === null);
     });
+    applyRanges();
     layout();
+  }
+
+  // ---- a channel's own y range (per board and channel, in this browser), else the panel's ----
+  function chanRange(c) {
+    if (c === null || c === undefined) return null;
+    try { return JSON.parse(store(`wave.crange.${boardSel.value}.${c}`) || "null"); } catch (e) { return null; }
+  }
+
+  function rangeFor(c) {
+    const r = chanRange(c);
+    return r && r.mode && r.mode !== "panel" ? { ...range, ...r } : range;
+  }
+
+  function applyRanges() {
+    cards.forEach((x) => {
+      x.plot.setRange(rangeFor(x.ch));
+      const own = chanRange(x.ch);
+      x.ybtn.classList.toggle("on", Boolean(own && own.mode !== "panel"));
+    });
+  }
+
+  function toggleCardRange(k) {
+    const x = cards[k], open = x.rangeRow.classList.contains("hidden");
+    x.rangeRow.classList.toggle("hidden", !open);
+    if (open) fillCardRange(x);
+    layout();
+  }
+
+  function fillCardRange(x) {
+    const r = { mode: "panel", lo: range.lo, hi: range.hi, half: range.half, ...(chanRange(x.ch) || {}) };
+    const save = (change) => {
+      Object.assign(r, change);
+      store(`wave.crange.${boardSel.value}.${x.ch}`, r.mode === "panel" ? null : JSON.stringify(r));
+      applyRanges();
+      fillCardRange(x);
+    };
+    const num = (key, width) => h("input.input.num", { type: "number", value: String(r[key]), style: `width:${width}`, "aria-label": key,
+                                                       onchange: (e) => save({ [key]: Number(e.target.value) }) });
+    const seg = h("select.input.input-sm", { "aria-label": t("y range of ch{c}", { c: x.ch }), onchange: (e) => save({ mode: e.target.value }) },
+                  [["panel", t("as all plots")], ["auto", t("Auto")], ["full", t("Full scale")], ["custom", t("Custom")], ["baseline", t("Baseline ± N")]]
+                    .map(([v, l]) => h("option", { value: v }, l)));
+    seg.value = r.mode;
+    clear(x.rangeRow, seg, r.mode === "custom" ? [num("lo", "80px"), h("span.text2", "–"), num("hi", "80px")] : null,
+          r.mode === "baseline" ? [h("span.text2", "±"), num("half", "70px")] : null);
   }
 
   // 4 plots a row when there is room, else 2 or 1; the rows share the height of the panel
@@ -475,7 +526,7 @@ export function wavePanel(app, { onBoard } = {}) {
     half.value = String(range.half);
     rangeSeg.set(range.mode);
     store("wave.range", JSON.stringify(range));
-    cards.forEach((c) => c.plot.setRange(range));
+    applyRanges();
     showControls();
   }
 
@@ -691,6 +742,7 @@ export function wavePanel(app, { onBoard } = {}) {
 
   return {
     el: panel,
+    controls,
     showBoard,
     board: () => boardSel.value,
     update(type) {
@@ -699,7 +751,7 @@ export function wavePanel(app, { onBoard } = {}) {
       if (type === "config" && !tuneBox.classList.contains("hidden")) fillTune();
       combo.update(type);
     },
-    restyle() { cards.forEach((c) => { c.plot.restyle(); c.plot.setRange(range); c.plot.setShow(lines); c.plot.setMouse(mouse); c.plot.setSpan(span); if (c.xy) c.xy.restyle(); }); load(true); combo.restyle(); },
+    restyle() { cards.forEach((c) => { c.plot.restyle(); c.plot.setRange(rangeFor(c.ch)); c.plot.setShow(lines); c.plot.setMouse(mouse); c.plot.setSpan(span); if (c.xy) c.xy.restyle(); }); load(true); combo.restyle(); },
     unmount() { gone = true; clearInterval(timer); ro.disconnect(); cards.forEach((c) => { c.plot.destroy(); if (c.xy) c.xy.destroy(); }); combo.unmount(); },
   };
 }

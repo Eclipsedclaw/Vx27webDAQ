@@ -180,7 +180,7 @@ class RunManager:
                       origin=f"ALAB DAQ v{__version__}", simulator=s.use_simulator or None, **(extra or {}))
         daq = [sys.executable, "-m", "alab_daq.daq", "run", run_dir]
         if s.use_simulator:
-            daq += ["--simulate", s.simulator_options]
+            daq += ["--simulate", s.sim_options()]
         cmd = [sys.executable, "-m", "alab_daq.web.wrapper", "--pid-file", os.path.join(run_dir, "daq.pid"),
                "--exit-file", os.path.join(run_dir, "daq.exit"), "--"] + daq
         env = dict(os.environ, PYTHONPATH=str(PROJECT / "src"), PYTHONUNBUFFERED="1", OMP_NUM_THREADS="1",

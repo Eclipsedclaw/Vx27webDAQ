@@ -18,6 +18,11 @@ Options (a string, as on the Settings page): --rate HZ (20), --share P (0.5), --
 --noise SIGMA (3), --seed N, and failures for the tests: --fail open:NAME, param:NAME:PARAM, read:NAME:N,
 nostop:NAME, unarmed:NAME (the board does not take the arm command), errflags:NAME:S (ErrorFlags 0x800 from S
 seconds into the run on).
+--generator staircase|train turns the random hits into a pulse generator, to see clear waveforms: hits come
+regularly (--rate per second), every channel of every board gets a pulse of the full --amplitude, negative on a
+V2730, positive on a V2740/V2745; staircase: channel k's pulse comes k x --spacing-us (1 us) after the trigger,
+starting again from the trigger when the record has no room left; train: every channel gets a pulse at the
+trigger and every --spacing-us after it, to the end of the record.
 Housekeeping: the temperatures rise slowly while the board runs; TriggerCnt counts its triggers, the dead time is
 1 µs per event, a channel's SelfTrgRate is the rate of hits on it.
 """
@@ -201,6 +206,8 @@ def parse_options(text: str) -> argparse.Namespace:
     ap.add_argument("--noise", type=float, default=3.0)
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--fail", action="append", default=[])
+    ap.add_argument("--generator", choices=("staircase", "train"), default=None)
+    ap.add_argument("--spacing-us", type=float, default=1.0)
     try:
         args, rest = ap.parse_known_args(shlex.split(text or ""))
     except (argparse.ArgumentError, SystemExit) as err:
@@ -250,9 +257,14 @@ class Crate:
                 blocks_t, blocks_s = [self.hit_times], [self.hit_seeds]
                 while self._hits_until < t1:
                     end = self._hits_until + 1.0
-                    n = int(self.rng.poisson(self.opt.rate)) if self.opt.rate > 0 else 0
-                    blocks_t.append(np.sort(self.rng.uniform(self._hits_until, end, n)))
-                    blocks_s.append(self.rng.integers(0, 2 ** 31, n))
+                    if self.opt.generator and self.opt.rate > 0:       # the generator: one pulse every 1/rate s
+                        k = np.arange(math.ceil(self._hits_until * self.opt.rate), math.ceil(end * self.opt.rate))
+                        blocks_t.append(k / self.opt.rate)
+                        blocks_s.append(k.astype(np.int64))
+                    else:
+                        n = int(self.rng.poisson(self.opt.rate)) if self.opt.rate > 0 else 0
+                        blocks_t.append(np.sort(self.rng.uniform(self._hits_until, end, n)))
+                        blocks_s.append(self.rng.integers(0, 2 ** 31, n))
                     self._hits_until = end
                 keep = min((b.produced_until for b in self.boards if b.produced_until is not None), default=0.0) - 30
                 t_all, s_all = np.concatenate(blocks_t), np.concatenate(blocks_s)
@@ -518,6 +530,8 @@ class SimBoard:
 
     def hit_amplitudes(self, seed: int) -> np.ndarray:
         """Per channel of this board: the pulse amplitude of a hit (0: no pulse there)."""
+        if self.crate.opt.generator:                       # the generator: every channel, the same height
+            return np.full(self.m.channels, float(self.crate.opt.amplitude))
         rng = np.random.default_rng([seed, self.index])
         on = rng.random(self.m.channels) < self.crate.opt.share
         return np.where(on, self.crate.opt.amplitude * rng.uniform(0.5, 1.5, self.m.channels), 0.0)
@@ -586,13 +600,26 @@ class SimBoard:
             pre = int(self.p("pretriggers"))
             tau = max(2.0, 120.0 / self.sample_ns())         # 120 ns decay
             rise = max(1.0, 8.0 / self.sample_ns())
-            k = np.arange(n) - pre + 2
-            shape = np.where(k < 0, 0.0, (1 - np.exp(-np.maximum(k, 0) / rise)) * np.exp(-np.maximum(k, 0) / tau))
-            shape /= max(shape.max(), 1e-9)
-            for i, c in enumerate(channels):
-                if amp[c] > 0:
-                    sign = 1.0 if self.ch[c]["selftriggeredge"] == "Rise" else -1.0
-                    w[i] += sign * amp[c] * shape
+            def pulse(start):                              # one pulse beginning at sample `start`
+                k = np.arange(n) - start
+                s = np.where(k < 0, 0.0, (1 - np.exp(-np.maximum(k, 0) / rise)) * np.exp(-np.maximum(k, 0) / tau))
+                return s / max(s.max(), 1e-9)
+            gen = self.crate.opt.generator
+            if gen:
+                step = self.crate.opt.spacing_us * 1000.0 / self.sample_ns()        # samples between pulses
+                room = n - pre - max(2.0, 50.0 / self.sample_ns())                   # where a pulse still shows
+                fit = max(1, int(room // step) + 1) if step > 0 else 1
+                sign = -1.0 if self.m.family == "2730" else 1.0
+                if gen == "train":
+                    train = sum(pulse(pre - 2 + j * step) for j in range(fit))
+                for i, c in enumerate(channels):
+                    w[i] += sign * amp[c] * (train if gen == "train" else pulse(pre - 2 + (c % fit) * step))
+            else:
+                shape = pulse(pre - 2)
+                for i, c in enumerate(channels):
+                    if amp[c] > 0:
+                        sign = 1.0 if self.ch[c]["selftriggeredge"] == "Rise" else -1.0
+                        w[i] += sign * amp[c] * shape
         return np.clip(np.rint(w), 0, adc_max).astype(np.uint16)
 
     def _produce(self, until: float) -> None:

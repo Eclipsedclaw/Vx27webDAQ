@@ -1,12 +1,14 @@
-// Run page, the front page: check the boards and start and stop runs (operators); the waveforms of one board,
-// live or from a file, in the big part; beside them the progress of the run with one row per board, and the DAQ
-// program's output. Everyone sees it live. The dividers can be dragged (kept for this browser).
+// Run page, the front page: check the boards and start and stop runs (operators); the waveforms, live or from a
+// file, in the big part; beside them three tabs: Plot (what the plots show), Progress (the run, one row per board,
+// statistics, the sync check) and Setup (the boards and their cables, setupview.js); under those the DAQ program's
+// output. Everyone sees it live. The dividers can be dragged and the tab is kept (for this browser).
 import { get, post, put } from "../api.js";
 import { T, t } from "../i18n.js";
 import { LinePlot, fmtTime } from "../plots.js";
 import { basename, chip, clear, confirmDialog, dialog, fail, fmtBytes, fmtCompact, fmtDuration, fmtInt, fmtNum, h, icon,
-         segmented, setText, splitter, toast, toggle } from "../ui.js";
+         segmented, setText, splitter, store, toast, toggle } from "../ui.js";
 import { wavePanel } from "../wavepanel.js";
+import { setupView } from "../setupview.js";
 
 const BOARD_STATES = { waiting: ["", T("waiting")], connecting: ["busy pulse", T("connecting")], connected: ["busy", T("connected")],
                        configuring: ["busy pulse", T("configuring")], configured: ["busy", T("configured")],
@@ -106,15 +108,32 @@ export function runPage(root, app) {
     statRows);
   const plotBox = h("div.bw-plot");
   const rootBox = h("div.stack", { style: "gap:6px" });
-  const progressCard = h("div.card.fill", h("div.card-head", h("h2.card-title", t("Progress")), h("span.card-sub", { id: "check-when" })),
-                         h("div.card-body.stack.side-body", tiles, syncLine, h("div.table-wrap", boardTable),
-                           h("div.table-wrap", statTable), plotBox, rootBox));
+  const setup = setupView(app);
+  const panels = {
+    plot: h("div.tab-panel", waves.controls),
+    progress: h("div.tab-panel.stack", h("div.hint", { id: "check-when" }), tiles, syncLine, h("div.table-wrap", boardTable),
+                h("div.table-wrap", statTable), plotBox, rootBox),
+    setup: h("div.tab-panel", setup.el),
+  };
+  let tab = ["plot", "progress", "setup"].includes(store("run.tab")) ? store("run.tab") : "plot";
+  const tabSeg = segmented([["plot", t("Plot")], ["progress", t("Progress")], ["setup", t("Setup")]], tab, (v) => setTab(v), { label: t("Panel") });
+  tabSeg.title = t("Plot: what the plots show · Progress: the run, its boards, statistics and the sync check · Setup: the boards and their cables, from the configuration");
+  const tabsCard = h("div.card.fill.side-tabs", h("div.card-head", tabSeg),
+                     h("div.card-body.side-body", panels.plot, panels.progress, panels.setup));
+  function setTab(v) {
+    tab = v;
+    store("run.tab", v);
+    tabSeg.set(v);
+    for (const [k, p] of Object.entries(panels)) p.classList.toggle("hidden", k !== v);
+    if (v === "setup") setup.render();
+  }
   const log = h("div.log", { role: "log", "aria-live": "off" });
   const follow = toggle(t("Follow"), true, (on) => { if (on) log.scrollTop = log.scrollHeight; });
   const logCard = h("div.card.fill", h("div.card-head", h("h2.card-title", t("DAQ output")), h("span.spacer"), follow),
                     h("div.card-body.flush", { style: "flex:1 1 auto;display:flex;flex-direction:column" }, log));
-  const side = splitter(progressCard, logCard, { key: "run.side", vertical: true, initial: 0.6 });
-  page.appendChild(splitter(waves.el, side, { key: "run.main", vertical: false, initial: 0.64, min: 300 }));
+  const side = splitter(tabsCard, logCard, { key: "run.side", vertical: true, initial: 0.66 });
+  page.appendChild(splitter(waves.el, side, { key: "run.main", vertical: false, initial: 0.7, min: 300 }));
+  setTab(tab);
   const plot = new LinePlot(plotBox, { xLabel: t("run time (s)"), yLabel: "MB/s" });
 
   // the boards shown: of the run going (or the last one), else of the configuration
@@ -510,6 +529,7 @@ export function runPage(root, app) {
       else if (type === "log_reset") addLines([], true);
       else if (type === "boards") showCheck();
       else if (type === "sequence") showRun();
+      if (tab === "setup" && (type === "run" || type === "config" || type === "boards")) setup.render();
       else if (type === "root" || type === "root_done") showRoot();
       else if (type === "config" || type === "settings") {
         setText(summary, configSummary(app));

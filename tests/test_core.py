@@ -269,6 +269,33 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual((m.channels, m.adc_max, m.sample_ns), (32, 16383, 2.0))
 
 
+class GeneratorTests(unittest.TestCase):
+    def test_staircase_and_train(self):
+        """The simulator's pulse generator: regular hits, a full pulse on every channel, negative on a V2730 and
+        positive on a V2740; staircase: channel k k x 1 us after the trigger, again from the trigger when the
+        record is full; train: a pulse every 1 us on every channel."""
+        from alab_daq.daq.sim import Crate
+        cr = Crate("--generator staircase --rate 10", "none", {"a": "VX2730", "b": "VX2740"}, {"a": 16, "b": 64})
+        a, b = cr.open("x", "a"), cr.open("y", "b")
+        for board, rec, pre in ((a, 2048, 512), (b, 512, 128)):
+            board.set("/par/RecordLengthS", str(rec))
+            board.set("/par/PreTriggerS", str(pre))
+        self.assertEqual([round(t, 3) for t, _ in cr.hits(0.0, 0.5)], [0.1, 0.2, 0.3, 0.4, 0.5])
+        wa, wb = a.waveforms([0, 1, 3, 4], 1, 2048), b.waveforms([0, 1, 5], 1, 512)
+        start_a = [int(np.argmax(w[:16].mean() - w > 100)) for w in wa]        # where each pulse begins
+        start_b = [int(np.argmax(w - w[:16].mean() > 100)) for w in wb]
+        self.assertEqual([s - start_a[0] for s in start_a], [0, 500, 1500, 0])  # 1 us = 500 samples of 2 ns
+        self.assertEqual([s - start_b[0] for s in start_b], [0, 125, 125])      # = 125 samples of 8 ns; ch5 like ch1
+        self.assertLess(wa[0].min() - wa[0][:16].mean(), -500)                  # negative on the V2730
+        self.assertGreater(wb[0].max() - wb[0][:16].mean(), 500)                # positive on the V2740
+        tr = Crate("--generator train --rate 10", "none", {"b": "VX2740"}).open("y", "b")
+        tr.set("/par/RecordLengthS", "512")
+        tr.set("/par/PreTriggerS", "128")
+        w = tr.waveforms([7], 1, 512)[0].astype(float) - 32768
+        rises = np.nonzero((w[1:] > 300) & (w[:-1] <= 300))[0]
+        self.assertEqual(len(rises), 4)                                       # 0, 1, 2, 3 us after the trigger
+
+
 class SyncCheckTests(unittest.TestCase):
     def test_counts(self):
         from alab_daq.daq.sync import SyncCheck
@@ -394,6 +421,9 @@ class DaqRunTests(unittest.TestCase):
                         self.assertEqual(f.header["board"]["channels"], 16)
                         self.assertEqual(f.event(0).channels, [0, 1, 2, 3])
             self.assertEqual(sorted(heads), ["run00007_vx2730.raw", "run00007_vx2740a.raw", "run00007_vx2740b.raw"])
+            lines = log.splitlines()                         # three reader threads log at once: whole lines only
+            self.assertNotIn("", lines)
+            self.assertEqual([l.count(": data file ") for l in lines if ": data file " in l], [1, 1, 1])
             master = heads["run00007_vx2730.raw"]
             self.assertGreater(len(master["trigger_id"]), 10)
             for name, h in heads.items():

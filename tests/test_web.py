@@ -532,6 +532,17 @@ class ConfigTests(WebTestCase):
 
 
 class BrowseTests(WebTestCase):
+    async def test_simulated_signal_setting(self):
+        """The simulated signal (Settings): only the known choices, and a run takes it as --generator."""
+        await self.login("oper1")
+        r = await self.client.put("/api/settings", json={"changes": {"simulator_pulses": "sawtooth"}}, headers=CHANGE)
+        self.assertEqual(r.status, 400)
+        r = await self.client.put("/api/settings", json={"changes": {"simulator_pulses": "staircase"}}, headers=CHANGE)
+        self.assertEqual(r.status, 200, await r.text())
+        self.assertEqual(self.station.settings.sim_options(), self.options + " --generator staircase")
+        s = await (await self.client.get("/api/settings")).json()
+        self.assertEqual(s["choices"]["simulator_pulses"], ["", "staircase", "train"])
+
     async def test_default_configuration_file(self):
         """The configuration file of the settings is not there yet (the NAS default on a new computer): the server
         starts with the lab's setup, and Save writes it there."""

@@ -25,7 +25,7 @@ from alab_daq.web.converter import RootConverter
 from alab_daq.web.files import DataFiles
 from alab_daq.web.runs import RunManager
 from alab_daq.web.sequence import SequenceManager
-from alab_daq.web.settings import SETTING_KINDS, ServerSettings, coerce, load_settings, save_settings, state_dir, write_atomic
+from alab_daq.web.settings import SETTING_CHOICES, SETTING_KINDS, ServerSettings, coerce, load_settings, save_settings, state_dir, write_atomic
 
 CLIENT_QUEUE = 400          # messages waiting for one page; a page that falls this far behind gets the state anew
 
@@ -254,7 +254,8 @@ class Station:
     def settings_payload(self) -> dict:
         lib = os.path.expanduser(self.settings.caen_lib_dir)
         libs = {name: os.path.isfile(os.path.join(lib, name)) for name in ("libCAEN_FELib.so", "libCAEN_Dig2.so")}
-        return {"values": asdict(self.settings), "kinds": SETTING_KINDS, "runs_folder": self.settings.runs_folder(),
+        return {"values": asdict(self.settings), "kinds": SETTING_KINDS, "choices": SETTING_CHOICES,
+                "runs_folder": self.settings.runs_folder(),
                 "caen_libs": libs}
 
     def update_settings(self, changes: dict, user: str, is_admin: bool) -> None:
