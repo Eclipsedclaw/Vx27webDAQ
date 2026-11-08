@@ -346,6 +346,48 @@ class RunTests(WebTestCase):
         self.assertEqual(r.status, 400)
 
 
+class SequenceTests(WebTestCase):
+    duration = 1
+
+    async def test_scan(self):
+        """A scan of the threshold over two values, one run each: two runs one after the other, each with its own
+        configuration and note; the configuration being edited stays as it was."""
+        await self.login("oper1")
+        spec = {"kind": "scan", "target": "threshold", "board": "b1", "values": "40, 90", "runs_per_value": 1, "duration_s": 1}
+        r = await self.client.post("/api/sequence/plan", json=spec, headers=CHANGE)
+        self.assertEqual((await r.json())["labels"], ["threshold = 40 on b1", "threshold = 90 on b1"])
+        r = await self.client.post("/api/sequence/plan", json={**spec, "duration_s": 0}, headers=CHANGE)
+        self.assertEqual(r.status, 400)                                  # a sequence's runs must end by themselves
+        r = await self.client.post("/api/sequence/start", json=spec, headers=CHANGE)
+        self.assertEqual(r.status, 200, await r.text())
+        r = await self.client.post("/api/sequence/start", json=spec, headers=CHANGE)
+        self.assertEqual(r.status, 409)                                  # one at a time
+        async def done():
+            s = self.station.sequence.view()
+            return s and s["state"] != "running"
+        await self.wait(done, 60, "the end of the sequence")
+        s = self.station.sequence.view()
+        self.assertEqual((s["state"], [x["phase"] for x in s["runs"]]), ("finished", ["finished", "finished"]))
+        for run, thr in zip(s["runs"], (40, 90)):
+            cfg, note = C.load_config(os.path.join(run["run_dir"], "config.json"))
+            self.assertEqual(cfg.boards[1].channels[0].threshold, thr)
+            self.assertIn(f"threshold = {thr} on b1", note)
+            self.assertEqual(cfg.run.duration_s, 1)
+        self.assertEqual(self.station.cfg.boards[1].channels[0].threshold, 100)    # the draft: unchanged
+        self.assertEqual(len({x["run_dir"] for x in s["runs"]}), 2)        # (simulated runs each have their own data folder)
+        # stop: the run going and the sequence
+        r = await self.client.post("/api/sequence/start", json={"kind": "repeat", "count": 3, "duration_s": 30}, headers=CHANGE)
+        self.assertEqual(r.status, 200)
+        async def running():
+            return (await self.run_state()).get("phase") == "running"
+        await self.wait(running, 15, "the first run of the repeat")
+        r = await self.client.post("/api/run/stop", json={}, headers=CHANGE)
+        self.assertEqual(r.status, 200)
+        await self.wait(self.ended, 30, "the end of the run")
+        self.assertTrue(self.station.sequence.view()["state"].startswith("stopped by oper1"))
+        self.assertEqual(len(self.station.sequence.view()["runs"]), 1)
+
+
 class StopTests(WebTestCase):
     duration = 0
 

@@ -9,7 +9,7 @@ export default {
   id: "datafile",
   title: T("Data file"),
   icon: "file",
-  summary: T("open a .raw or ROOT file: its waveforms, its overview, or a ROOT file of it"),
+  summary: T("open a .raw or ROOT file: its waveforms, its overview, a ROOT file of it, its run's boards in one file, or some events as text"),
   open: true,
   make(body, ctx) {
     let file = store("tools.file") || "", info = null;

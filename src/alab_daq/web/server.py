@@ -377,6 +377,24 @@ async def boards_param(request):
 
 
 @api("operator")
+async def sequence_plan(request):
+    labels, _ = request.app["station"].sequence.plan(await body(request))
+    return {"labels": labels}
+
+
+@api("operator")
+async def sequence_start(request):
+    return request.app["station"].sequence.start(request["user"], await body(request))
+
+
+@api("operator")
+async def sequence_stop(request):
+    data = await body(request) if request.can_read_body else {}
+    request.app["station"].sequence.stop(request["user"], now=bool(data.get("now")))
+    return {"ok": True}
+
+
+@api("operator")
 async def run_kill(request):
     request.app["station"].runs.kill(request["user"])
     return {"ok": True}
@@ -625,6 +643,9 @@ def create_app(station: Station | None = None) -> web.Application:
     r.add_post("/api/run/stop", run_stop)
     r.add_post("/api/run/kill", run_kill)
     r.add_post("/api/run/control", run_control)
+    r.add_post("/api/sequence/plan", sequence_plan)
+    r.add_post("/api/sequence/start", sequence_start)
+    r.add_post("/api/sequence/stop", sequence_stop)
     r.add_post("/api/boards/param", boards_param)
     r.add_post("/api/boards/check", boards_check)
     r.add_get("/api/boards/tree", boards_tree)

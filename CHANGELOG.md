@@ -5,6 +5,10 @@ What changed in each version of ALAB DAQ. Write the notes of the next version un
 
 ## Unreleased
 
+## v0.0.10 (2026-11-08)
+
+- Run sequences (WaveDump2's settings scripts): N repeats, or a scan of every channel's threshold or DC offset (one board or all) or of any board parameter over a list of values, R runs each, every run a copy of the configuration with its step's change and a note naming it (`web/sequence.py`); a failed run stops it, Stop ends the run and the sequence; after a server restart a sequence is marked interrupted.
+
 ## v0.0.9 (2026-11-08)
 
 - Every board per trigger, and text export. `core/eventbuild.py` writes `RUN_built.root` (WaveDump2's multi-board single file): one entry per event of the first board, each board's event with the same trigger ID (continuous over the 24-bit wrap) within the sync window, with found flags, timestamp differences and the samples; queued after every run of several boards (Settings: build_events) and from the Data file tool. The Data file tool also downloads events as text (WaveDump2's ASCII layout).

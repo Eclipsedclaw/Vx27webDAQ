@@ -61,6 +61,7 @@ function applyMessage(msg) {
     case "boards": s.boards = msg.boards; return;
     case "root": s.root = msg.root; return;
     case "memory": s.memory = msg.memory; return;
+    case "sequence": s.sequence = msg.sequence; return;
     default:
   }
 }

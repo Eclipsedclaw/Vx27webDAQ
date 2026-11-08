@@ -5,7 +5,7 @@ import { get, post, put } from "../api.js";
 import { T, t } from "../i18n.js";
 import { LinePlot, fmtTime } from "../plots.js";
 import { basename, chip, clear, confirmDialog, dialog, fail, fmtBytes, fmtCompact, fmtDuration, fmtInt, fmtNum, h, icon,
-         setText, splitter, toast, toggle } from "../ui.js";
+         segmented, setText, splitter, toast, toggle } from "../ui.js";
 import { wavePanel } from "../wavepanel.js";
 
 const BOARD_STATES = { waiting: ["", T("waiting")], connecting: ["busy pulse", T("connecting")], connected: ["busy", T("connected")],
@@ -54,6 +54,10 @@ export function runPage(root, app) {
   const stopBtn = h("button.btn", { type: "button", onclick: stopRun, title: t("End the run cleanly: the master stops the chain, every board sends its last data and its stop record") },
                     icon("stop"), t("Stop"));
   const forceBtn = h("button.btn", { type: "button", onclick: forceTrigger }, icon("zoom"), t("Force trigger"));
+  const seqBtn = h("button.btn", { type: "button", onclick: sequenceDialog,
+                                   title: t("Runs one after the other: N repeats, or a scan of a threshold, a DC offset or any parameter") },
+                  icon("list"), t("Sequence…"));
+  const seqLine = h("div.row.nowrap.seq-line.hidden");
   const killBtn = h("button.btn.btn-danger", { type: "button", onclick: killRun,
                                                title: t("Only if Stop does not work: the end of the data can be lost and the boards stay armed") },
                     icon("kill"), t("Kill"));
@@ -71,8 +75,8 @@ export function runPage(root, app) {
                      app.can("control") ? h("a.small", { href: "#config", title: t("The note is on the Configuration page") }, t("edit")) : null);
   page.appendChild(h("div.card.run-bar",
     h("div.card-body.stack",
-      h("div.row", checkBtn, h("span.sep"), startBtn, stopBtn, killBtn, forceBtn, h("span.sep"), phase, who, h("span.spacer"), timeText, convert),
-      bar, noteLine, result)));
+      h("div.row", checkBtn, h("span.sep"), startBtn, seqBtn, stopBtn, killBtn, forceBtn, h("span.sep"), phase, who, h("span.spacer"), timeText, convert),
+      bar, noteLine, seqLine, result)));
 
   // ---- waveforms | progress and output ----
   let boardEls = [];
@@ -188,10 +192,14 @@ export function runPage(root, app) {
     const last = r && !r.active ? r.last : null;
     const shown = active ? r : last;
     const control = app.can("control");
-    startBtn.disabled = !control || active;
+    const seqGoing = Boolean(app.state.sequence && app.state.sequence.state === "running");
+    startBtn.disabled = !control || active || seqGoing;           // between two runs of a sequence too
     stopBtn.disabled = !control || !active || Boolean(r.stop_sent_at);
     const killOk = active && r.stop_sent_at && (Date.now() / 1000 - r.stop_sent_at) > r.kill_after_s;
     killBtn.disabled = !control || !killOk;
+    const seq = app.state.sequence, seqOn = Boolean(seq && seq.state === "running");
+    seqBtn.disabled = !control || active || seqOn;
+    showSequence(seq);
     const targets = (active && r.force_targets) || [];
     forceBtn.disabled = !control || !active || r.phase !== "running" || !targets.length || Boolean(r.stop_sent_at);
     forceBtn.title = !active ? t("During a run: one software trigger now")
@@ -381,6 +389,88 @@ export function runPage(root, app) {
     } catch (err) { fail(err); }
   }
 
+  function showSequence(seq) {
+    const recent = seq && (seq.state === "running" || Date.now() / 1000 - (seq.ended || 0) < 3600);
+    seqLine.classList.toggle("hidden", !recent);
+    if (!recent) return;
+    const k = Math.min(seq.index, seq.count - 1), on = seq.state === "running";
+    const done = (seq.runs || []).filter((r) => r.phase === "finished").length;
+    clear(seqLine, icon("list"),
+          h("b.small", t("Sequence {id}:", { id: seq.id })),
+          h("span.small.grow.break", on ? t("run {k} of {n} · {step}", { k: k + 1, n: seq.count, step: seq.labels[k] }) + (seq.next_at ? ` · ${t("the next starts in a moment")}` : "")
+                                    : `${t(seq.state)} · ${t("{d} of {n} runs finished", { d: done, n: seq.count })}`),
+          on && app.can("control") ? h("button.btn.btn-sm", { type: "button", onclick: () => post("/api/sequence/stop", { now: false }).catch(fail),
+                                                          title: t("The run going finishes; no further runs start (Stop ends the run too)") }, t("Stop after this run")) : null);
+  }
+
+  async function sequenceDialog() {
+    const cfg = app.state.config.config;
+    const st = { kind: "repeat", count: 5, duration_s: cfg.run.duration_s || 60, target: "threshold", board: "", path: "", values: "50, 100, 150, 200",
+                 runs_per_value: 1, stop_on_failure: true, ...(JSON.parse(localStorage.getItem("alab.seq.last") || "null") || {}) };
+    const num = (key, lo, hi, width = "110px") => h("input.input.num", { type: "number", min: String(lo), max: String(hi), value: String(st[key]), style: `width:${width}`,
+                                                                       oninput: (e) => { st[key] = Number(e.target.value); } });
+    const repeatBox = h("div.form-grid", ...field2(t("runs"), num("count", 1, 1000)));
+    const targetSel = h("select.input", { onchange: () => { st.target = targetSel.value; showKind(); } },
+                        [["threshold", t("threshold of every channel (ADC counts)")], ["dc_offset", t("DC offset of every channel (%)")], ["param", t("a board parameter")]]
+                          .map(([v, l]) => h("option", { value: v }, l)));
+    targetSel.value = st.target;
+    const boardSel = h("select.input", { onchange: () => { st.board = boardSel.value; } },
+                       [h("option", { value: "" }, t("every board")), ...cfg.boards.filter((b) => b.enabled).map((b) => h("option", { value: b.name }, b.name))]);
+    boardSel.value = st.board;
+    const pathIn = h("input.input.mono", { value: st.path, placeholder: "/par/TestPulsePeriod", style: "width:min(300px,100%)", oninput: () => { st.path = pathIn.value.trim(); } });
+    const valuesIn = h("input.input", { value: st.values, style: "width:min(360px,100%)", oninput: () => { st.values = valuesIn.value; } });
+    const from = h("input.input.num", { type: "number", style: "width:90px", placeholder: t("from") });
+    const to = h("input.input.num", { type: "number", style: "width:90px", placeholder: t("to") });
+    const step = h("input.input.num", { type: "number", style: "width:90px", placeholder: t("step") });
+    const fill = h("button.btn.btn-sm", { type: "button", onclick: () => {
+      const a = Number(from.value), b = Number(to.value), d = Math.abs(Number(step.value)) || 1, out = [];
+      for (let v = a; a <= b ? v <= b + 1e-9 : v >= b - 1e-9; v += a <= b ? d : -d) { out.push(+v.toFixed(6)); if (out.length >= 200) break; }
+      valuesIn.value = st.values = out.join(", ");
+    } }, t("Fill in"));
+    const scanBox = h("div.form-grid",
+      ...field2(t("change"), targetSel), ...field2(t("on"), boardSel),
+      ...field2(t("parameter"), pathIn, t("set last on the board, like an expert parameter")),
+      ...field2(t("values"), valuesIn, t("separated by commas")),
+      ...field2("", [from, to, step, fill], t("or from … to … in steps of …")),
+      ...field2(t("runs per value"), num("runs_per_value", 1, 100, "90px")));
+    const listBox = h("div.small.seq-list");
+    const kindSeg = segmented([["repeat", t("repeat")], ["scan", t("scan")]], st.kind, (v) => { st.kind = v; showKind(); }, { label: t("kind") });
+    const stopFail = h("input", { type: "checkbox", checked: st.stop_on_failure, onchange: () => { st.stop_on_failure = stopFail.checked; } });
+    function showKind() {
+      repeatBox.classList.toggle("hidden", st.kind !== "repeat");
+      scanBox.classList.toggle("hidden", st.kind !== "scan");
+      const pf = pathIn.closest(".seq-field");
+      pf.classList.toggle("hidden", st.target !== "param");
+      pf.previousElementSibling.classList.toggle("hidden", st.target !== "param");
+      clear(listBox);
+    }
+    function spec() { return { ...st, values: st.values }; }
+    const body = h("div.stack",
+      h("p.hint", { style: "margin:0" }, t("Runs of the configuration one after the other, each stopping at its run time; every run gets its own files and a note that names the step. The configuration being edited is not changed.")),
+      h("div.row", kindSeg, h("span.label", t("each run")), num("duration_s", 1, 604800), h("span.text2", t("s"))),
+      repeatBox, scanBox,
+      h("label.row.nowrap", stopFail, t("stop the sequence when a run fails")),
+      h("div.row", h("button.btn.btn-sm", { type: "button", onclick: async () => {
+        try {
+          const r = await post("/api/sequence/plan", spec());
+          clear(listBox, h("b", t("{n} runs:", { n: r.labels.length })), h("ol", r.labels.slice(0, 50).map((l) => h("li", l))),
+                r.labels.length > 50 ? h("div.hint", t("… and {n} more", { n: r.labels.length - 50 })) : null);
+        } catch (err) { clear(listBox, h("span.warn-text", err.message)); }
+      } }, icon("list"), t("Show the runs"))),
+      listBox);
+    showKind();
+    const go = await dialog({ title: t("Run sequence"), body, wide: true,
+                              actions: [{ label: t("Cancel"), value: false }, { label: t("Start the sequence"), kind: "primary", icon: "run",
+                                          run: async () => { await post("/api/sequence/start", spec()); return true; } }] });
+    try { localStorage.setItem("alab.seq.last", JSON.stringify(st)); } catch (e) { /* not kept */ }
+    if (go) toast(t("The sequence started"), "ok");
+  }
+
+  function field2(label, control, hint) {           // a row of the sequence form: label | control, hint
+    const cell = h("div.seq-field", Array.isArray(control) ? h("div.row", control) : control, hint ? h("div.hint", hint) : null);
+    return [h("span.label", label), cell];
+  }
+
   async function forceTrigger() {
     try {
       const r = await post("/api/run/control", { cmd: "swtrigger" });
@@ -419,6 +509,7 @@ export function runPage(root, app) {
       } else if (type === "log") addLines(msg.lines, false);
       else if (type === "log_reset") addLines([], true);
       else if (type === "boards") showCheck();
+      else if (type === "sequence") showRun();
       else if (type === "root" || type === "root_done") showRoot();
       else if (type === "config" || type === "settings") {
         setText(summary, configSummary(app));

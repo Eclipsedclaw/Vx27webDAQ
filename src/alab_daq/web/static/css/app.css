@@ -578,3 +578,10 @@ details.explain p { margin: 6px 0 0; font-size: 12.5px; color: var(--text-2); li
 .mc-out { min-height: 18px; color: var(--text-2); overflow-wrap: anywhere; }
 .plan-table tr.pick { cursor: pointer; }
 .plan-table tr.pick:hover td { background: var(--hover); }
+
+/* ---- run sequences (Run page) ---- */
+.seq-line { gap: 8px; font-size: 12.5px; padding: 6px 10px; border-radius: var(--radius-sm); background: var(--accent-soft); color: var(--accent-strong); }
+.seq-line .btn { flex: none; }
+.seq-list { max-height: 220px; overflow: auto; }
+.seq-list ol { margin: 4px 0 0 18px; padding: 0; }
+.seq-field { min-width: 0; }

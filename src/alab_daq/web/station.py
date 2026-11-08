@@ -24,6 +24,7 @@ from alab_daq.web.boardcheck import BoardCheck
 from alab_daq.web.converter import RootConverter
 from alab_daq.web.files import DataFiles
 from alab_daq.web.runs import RunManager
+from alab_daq.web.sequence import SequenceManager
 from alab_daq.web.settings import SETTING_KINDS, ServerSettings, coerce, load_settings, save_settings, state_dir, write_atomic
 
 CLIENT_QUEUE = 400          # messages waiting for one page; a page that falls this far behind gets the state anew
@@ -58,6 +59,7 @@ class Station:
         self.runs = RunManager(self)
         self.converter = RootConverter(self)
         self.boards = BoardCheck(self)
+        self.sequence = SequenceManager(self)
         self.files = DataFiles(self.data_roots)
         self._tasks: list[asyncio.Task] = []
         self._edit_logged: dict[str, float] = {}
@@ -86,6 +88,7 @@ class Station:
             await asyncio.sleep(0.2)
             try:
                 await self.runs.tick()
+                await self.sequence.tick()
             except Exception as err:       # following the run must never stop
                 self.activity("server", "error while following the run", repr(err))
                 await asyncio.sleep(2)
@@ -120,6 +123,7 @@ class Station:
         except OSError:
             mem = None
         return {"version": __version__, "run": self.runs.snapshot(full=True), "log": self.runs.lines[-3000:],
+                "sequence": self.sequence.view(),
                 "config": self.config_payload(), "settings": self.settings_payload(), "boards": self.boards.view(),
                 "root": self.converter.status(), "memory": mem,
                 "roots": [{"label": label, "path": path} for label, path in self.data_roots()]}

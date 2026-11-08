@@ -146,12 +146,17 @@ class RunManager:
                 "run_name": next_run_name([data_dir]) if not s.use_simulator else None,
                 "free_bytes": free, "need_bytes": need, "converting": st.converter.left()}
 
-    def start(self, user: str, note: str | None = None) -> str:
-        """Start a run; note: the note for it (and for the next runs), as edited in the Start question."""
+    def start(self, user: str, note: str | None = None, cfg: C.DaqConfig | None = None, run_note: str | None = None,
+              extra: dict | None = None) -> str:
+        """Start a run; note: the note for it (and for the next runs), as edited in the Start question. A run
+        sequence gives its own configuration (cfg), the run's note (run_note) and what goes into config.json (extra)."""
         st, s = self.station, self.station.settings
         p = self.preview()
         if p["busy"]:
             raise RunError("a run is going already")
+        if cfg is not None:
+            p["errors"] = [asdict(x) for x in C.check_config(cfg, check_paths=not s.use_simulator, facts=st.boards.facts())
+                           if x.level == "error"]
         if p["errors"]:
             raise RunError("the configuration has errors: " + "; ".join(f"{e['where']}: {e['message']}"
                                                                          for e in p["errors"]))
@@ -159,7 +164,8 @@ class RunManager:
             raise RunError("a DAQ program is running already (pid " + ", ".join(str(o["pid"]) for o in p["others"]) + ")")
         if note is not None:
             st.set_note(note, user)
-        cfg = st.cfg.copy()
+        cfg = (cfg or st.cfg).copy()
+        this_note = st.run_note if run_note is None else run_note
         base = os.path.join(s.runs_folder(), time.strftime("%Y%m%d_%H%M%S") + ("_simulator" if s.use_simulator else ""))
         run_dir, n = base, 1
         while os.path.exists(run_dir):
@@ -169,9 +175,9 @@ class RunManager:
             cfg.run.data_dir, cfg.run.write_raw = os.path.join(run_dir, "raw"), True
             os.makedirs(cfg.run.data_dir)
         run_name = next_run_name([os.path.expanduser(cfg.run.data_dir)])
-        C.save_config(cfg, os.path.join(run_dir, "config.json"), note=st.run_note, run_name=run_name,
+        C.save_config(cfg, os.path.join(run_dir, "config.json"), note=this_note, run_name=run_name,
                       run_folder=run_dir, started_by=user, started=time.strftime("%Y-%m-%d %H:%M:%S"),
-                      origin=f"ALAB DAQ v{__version__}", simulator=s.use_simulator or None)
+                      origin=f"ALAB DAQ v{__version__}", simulator=s.use_simulator or None, **(extra or {}))
         daq = [sys.executable, "-m", "alab_daq.daq", "run", run_dir]
         if s.use_simulator:
             daq += ["--simulate", s.simulator_options]
@@ -185,7 +191,7 @@ class RunManager:
             proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, cwd=run_dir,
                                     env=env, start_new_session=True)
         self._begin(Active(run_dir, cfg, run_name, daq, time.time(), user, s.use_simulator, proc.pid, proc=proc,
-                           note=st.run_note))
+                           note=this_note))
         self._write_current(self.active)
         st.activity(user, "started a run", f"{run_name} · {run_dir}")
         return run_dir
@@ -240,6 +246,9 @@ class RunManager:
 
     # ---- during a run ----
     def stop(self, user: str) -> None:
+        seq = getattr(self.station, "sequence", None)
+        if seq is not None and seq.running():          # Stop on the page: the run and its sequence
+            seq.stop(user)
         a = self._need_active()
         if not self._signal(a, signal.SIGTERM):
             raise RunError("the DAQ program has ended already")
@@ -491,6 +500,9 @@ class RunManager:
         self.live_seq += 1
         self.publish_state()
         self.station.activity(a.started_by, f"run ended: {phase}", f"{a.run_name} · {a.run_dir}")
+        seq = getattr(self.station, "sequence", None)
+        if seq is not None:
+            seq.run_ended(phase)
         keep = [p for p in files if os.path.isfile(p) and os.path.getsize(p) > 0]
         if keep and self.station.settings.convert_to_root:
             self.station.converter.add(keep, a.run_dir, run_json=a.path("run.json"), by=a.started_by)
