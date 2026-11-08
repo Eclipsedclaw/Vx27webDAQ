@@ -192,6 +192,7 @@ class RoleTests(WebTestCase):
 
 class RunTests(WebTestCase):
     convert_to_root = True
+    duration = 6                # time for the live checks and the commands during the run
 
     async def test_whole_run(self):
         await self.login("oper1")
@@ -216,6 +217,22 @@ class RunTests(WebTestCase):
         self.assertTrue(same.get("same") or same.get("seq") != v["seq"])
         ov = await (await self.client.get("/api/live/overview")).json()
         self.assertEqual([b["name"] for b in ov["boards"]], ["b0", "b1"])
+        # commands during the run: a Force trigger (each board triggers by itself: to both), a threshold
+        async def running():
+            return (await self.run_state()).get("phase") == "running"
+        await self.wait(running, 15, "the boards running")
+        r = await self.client.post("/api/run/control", json={"cmd": "swtrigger"}, headers=CHANGE)
+        self.assertEqual((r.status, (await r.json())["boards"]), (200, ["b0", "b1"]))
+        r = await self.client.post("/api/run/control", json={"cmd": "set", "board": "b1", "channel": 2, "what": "threshold",
+                                                           "value": 150, "keep": True}, headers=CHANGE)
+        res = await r.json()
+        self.assertEqual((r.status, res["ok"], res["value"], res["kept"]), (200, True, "-150", True))
+        self.assertEqual(self.station.cfg.board("b1").channels[2].threshold, 150)        # kept for the next runs
+        r = await self.client.post("/api/run/control", json={"cmd": "set", "board": "b1", "channel": 99, "what": "threshold",
+                                                           "value": 150}, headers=CHANGE)
+        self.assertEqual(r.status, 400)
+        r = await self.client.post("/api/boards/param", json={"board": "b0", "action": "get", "path": "/par/ModelName"}, headers=CHANGE)
+        self.assertEqual(r.status, 409)                                  # not during a run
         # the combined view: one moment of both boards (the DAQ's matched set)
         async def matched():
             c = await (await self.client.get("/api/live/combined", params={"traces": "b0:0,b1:1,b1:2"})).json()
@@ -281,6 +298,21 @@ class RunTests(WebTestCase):
         self.assertEqual(r.status, 403)                                  # only the data folders
         r = await self.client.post("/api/root/convert", json={"path": files[0]}, headers=CHANGE)
         self.assertEqual(r.status, 409)                                  # never over an existing ROOT file
+        self.assertEqual(last["changes"][0]["path"], "/ch/2/par/TriggerThr")
+        # the manual controller, now that no run is going
+        r = await self.client.post("/api/boards/param", json={"board": "b1", "action": "get", "path": "/par/ModelName"}, headers=CHANGE)
+        res = await r.json()
+        self.assertEqual((r.status, res["ok"], res["value"]), (200, True, "V2730"))
+        r = await self.client.post("/api/boards/param", json={"board": "b1", "action": "set", "path": "/par/TrgOutMode", "value": "Busy"}, headers=CHANGE)
+        self.assertEqual((await r.json())["value"], "Busy")
+        r = await self.client.post("/api/boards/param", json={"board": "b1", "action": "set", "path": "/par/TrgOutMode", "value": "Nonsense"}, headers=CHANGE)
+        self.assertFalse((await r.json())["ok"])                       # the board refuses it
+        r = await self.client.post("/api/boards/param", json={"board": "b1", "action": "cmd", "path": "Reset"}, headers=CHANGE)
+        self.assertTrue((await r.json())["ok"])
+        for bad in ({"board": "b1", "action": "get", "path": "/etc/passwd"}, {"board": "b1", "action": "cmd", "path": "a;b"},
+                    {"board": "zz", "action": "get", "path": "/par/X"}):
+            r = await self.client.post("/api/boards/param", json=bad, headers=CHANGE)
+            self.assertIn(r.status, (400, 409), bad)
 
     async def test_refused_configuration(self):
         await self.login("oper1")

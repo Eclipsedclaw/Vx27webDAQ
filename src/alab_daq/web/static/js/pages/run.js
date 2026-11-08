@@ -53,6 +53,7 @@ export function runPage(root, app) {
   const startBtn = h("button.btn.btn-primary", { type: "button", onclick: startRun }, icon("run"), t("Start run"));
   const stopBtn = h("button.btn", { type: "button", onclick: stopRun, title: t("End the run cleanly: the master stops the chain, every board sends its last data and its stop record") },
                     icon("stop"), t("Stop"));
+  const forceBtn = h("button.btn", { type: "button", onclick: forceTrigger }, icon("zoom"), t("Force trigger"));
   const killBtn = h("button.btn.btn-danger", { type: "button", onclick: killRun,
                                                title: t("Only if Stop does not work: the end of the data can be lost and the boards stay armed") },
                     icon("kill"), t("Kill"));
@@ -70,7 +71,7 @@ export function runPage(root, app) {
                      app.can("control") ? h("a.small", { href: "#config", title: t("The note is on the Configuration page") }, t("edit")) : null);
   page.appendChild(h("div.card.run-bar",
     h("div.card-body.stack",
-      h("div.row", checkBtn, h("span.sep"), startBtn, stopBtn, killBtn, h("span.sep"), phase, who, h("span.spacer"), timeText, convert),
+      h("div.row", checkBtn, h("span.sep"), startBtn, stopBtn, killBtn, forceBtn, h("span.sep"), phase, who, h("span.spacer"), timeText, convert),
       bar, noteLine, result)));
 
   // ---- waveforms | progress and output ----
@@ -191,6 +192,12 @@ export function runPage(root, app) {
     stopBtn.disabled = !control || !active || Boolean(r.stop_sent_at);
     const killOk = active && r.stop_sent_at && (Date.now() / 1000 - r.stop_sent_at) > r.kill_after_s;
     killBtn.disabled = !control || !killOk;
+    const targets = (active && r.force_targets) || [];
+    forceBtn.disabled = !control || !active || r.phase !== "running" || !targets.length || Boolean(r.stop_sent_at);
+    forceBtn.title = !active ? t("During a run: one software trigger now")
+      : targets.length ? t("One software trigger now, to {b}: every board records it", { b: targets.join(", ") })
+      : r.setup === "master" ? t("The master sends ITLA on TRG-OUT: a software trigger would reach only the master, and its trigger IDs would no longer match the other boards'. Choose AcceptTrg (Configuration, the master sends) to force triggers")
+      : t("In this trigger setup the triggers come from outside (a pulser, a logic unit): no software trigger");
     setText(phase, active ? app.phaseText(r) : last ? (last.phase === "finished" ? t("Finished") : t("Failed")) : t("Idle"));
     phase.style.color = active ? "" : last && last.phase === "failed" ? "var(--critical-text)" : "";
     setText(who, shown ? [shown.run_name ? `${shown.run_name} · ` : "", t("started by {name} · {time}", { name: shown.started_by || "?", time: new Date(shown.started * 1000).toLocaleString() }),
@@ -371,6 +378,13 @@ export function runPage(root, app) {
     try {
       await post("/api/run/start", { note: noteBox.value });
       toast(t("Run started"), "ok");
+    } catch (err) { fail(err); }
+  }
+
+  async function forceTrigger() {
+    try {
+      const r = await post("/api/run/control", { cmd: "swtrigger" });
+      toast(r.ok ? t("Force trigger: {m}", { m: r.message }) : r.message, r.ok ? "ok" : "error");
     } catch (err) { fail(err); }
   }
 

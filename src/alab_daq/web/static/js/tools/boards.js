@@ -1,9 +1,11 @@
 // Tool: the boards, as they said at the last board check: model, serial, firmware, channels, ADC, the largest raw
 // buffer, temperatures; and the whole parameter tree of a board (as WaveDump2's Device Manager shows it), with a
-// filter: the names and allowed values to use for the expert parameters of the Configuration page.
+// filter: the names and allowed values to use for the expert parameters of the Configuration page. The manual
+// controller (WaveDump2's) gets or sets one parameter of an idle board, or sends it a command (operators; a click
+// on a parameter fills it in). The next run resets every board and sets it from the configuration.
 import { get, post } from "../api.js";
 import { T, t } from "../i18n.js";
-import { clear, fail, fmtBytes, fmtClock, fmtInt, fmtNum, h, icon, setText, store } from "../ui.js";
+import { clear, fail, fmtBytes, fmtClock, fmtInt, fmtNum, h, icon, setText, store, toast } from "../ui.js";
 
 export default {
   id: "boards",
@@ -29,7 +31,20 @@ export default {
     const treeInfo = h("span.hint");
     const treeBox = h("div.table-wrap", { style: "max-height:60vh" });
     let tree = null;
-    body.append(h("div.row", checkBtn, when), factsBox,
+    // the manual controller
+    const mcPath = h("input.input.mono", { placeholder: "/par/TrgOutMode   /ch/3/par/DCOffset   Reset", style: "width:min(300px,100%)",
+                                          "aria-label": t("parameter path or command") });
+    const mcValue = h("input.input.mono", { placeholder: t("value"), style: "width:150px", "aria-label": t("value") });
+    const mcChoice = h("select.input.hidden", { "aria-label": t("allowed values"), onchange: () => { mcValue.value = mcChoice.value; } });
+    const mcGet = h("button.btn.btn-sm", { type: "button", onclick: () => mc("get") }, t("Get"));
+    const mcSet = h("button.btn.btn-sm", { type: "button", onclick: () => mc("set") }, t("Set"));
+    const mcCmd = h("button.btn.btn-sm", { type: "button", onclick: () => mc("cmd"),
+                                        title: t("Send the command named in the path field, e.g. Reset or ReloadCalibration (sent as /cmd/NAME)") }, t("Send command"));
+    const mcOut = h("div.mono.small.mc-out");
+    const mcBox = h("div.chan-box", { style: "margin-top:10px" },
+      h("div.row.wrap", h("b.small", t("Manual controller")), h("span.hint", t("one parameter of the board chosen below, while no run is going; the next run resets the board and sets it from the configuration (lasting settings: Expert parameters)"))),
+      h("div.row.wrap", mcPath, mcValue, mcChoice, mcGet, mcSet, mcCmd), mcOut);
+    body.append(h("div.row", checkBtn, when), factsBox, mcBox,
                 h("div.row", { style: "margin-top:10px" }, h("b.small", t("Parameters of")), boardSel, filter,
                   h("label.row.nowrap", allCh, t("every channel (else channel 0 only)")), h("span.spacer"), treeInfo),
                 treeBox);
@@ -81,8 +96,44 @@ export default {
       const extra = (r) => Object.entries(r).filter(([k]) => !["path", "value", "accessmode", "handle"].includes(k))
         .map(([k, v]) => `${k}: ${v}`).join(" · ");
       clear(treeBox, h("table.table.plan-table", h("thead", h("tr", h("th", t("parameter")), h("th", t("value")), h("th", t("access")), h("th", t("more")))),
-        h("tbody", rows.slice(0, 3000).map((r) => h("tr", h("td.mono", r.path), h("td.mono", String(r.value ?? "")),
+        h("tbody", rows.slice(0, 3000).map((r) => h("tr.pick", { title: t("Click: into the manual controller"), onclick: () => pickParam(r) },
+                                                     h("td.mono", r.path), h("td.mono", String(r.value ?? "")),
                                                      h("td.small", r.accessmode || ""), h("td.hint", extra(r)))))));
+    }
+
+    // a parameter of the tree into the manual controller: its path as FELib takes it, its value and allowed values
+    function pickParam(r) {
+      const m = /^\/(cmd)\/([^/]+)$/.exec(r.path);
+      mcPath.value = m ? m[2] : r.path;
+      mcValue.value = String(r.value ?? "");
+      let allowed = r.allowedvalues ? String(r.allowedvalues).split(", ") : [];
+      if (!allowed.length && tree) allowed = tree.rows.filter((x) => x.path.startsWith(`${r.path}/allowedvalues/`) && x.value !== undefined).map((x) => String(x.value));
+      clear(mcChoice, h("option", { value: "" }, t("allowed values…")), allowed.map((v) => h("option", { value: v }, v)));
+      mcChoice.classList.toggle("hidden", !allowed.length);
+      mcPath.scrollIntoView({ block: "nearest" });
+      mcPath.focus();
+    }
+
+    function showMc() {
+      const C = app.state.boards || {}, active = app.state.run && app.state.run.active;
+      const ok = app.can("control") && !active && !C.running && boardSel.value;
+      for (const b of [mcGet, mcSet, mcCmd]) b.disabled = !ok;
+      mcBox.title = !app.can("control") ? t("Operators use the manual controller") : active ? t("Not during a run: the DAQ program has the boards") : "";
+    }
+
+    async function mc(action) {
+      const path = mcPath.value.trim();
+      if (!path) { mcPath.focus(); return; }
+      if (action === "set" && !mcValue.value.trim()) { mcValue.focus(); return; }
+      setText(mcOut, t("asking {b}…", { b: boardSel.value }));
+      try {
+        const r = await post("/api/boards/param", { board: boardSel.value, action, path, value: mcValue.value });
+        const sim = r.simulator ? ` · ${t("simulated")}` : "";
+        if (r.ok && action !== "cmd") { mcValue.value = String(r.value ?? ""); setText(mcOut, `${boardSel.value} ${r.path} = ${r.value}${sim}`); }
+        else if (r.ok) setText(mcOut, t("{b}: command {c} sent", { b: boardSel.value, c: path }) + sim);
+        else setText(mcOut, `${boardSel.value}: ${r.error}${sim}`);
+        if (action !== "get") toast(r.ok ? t("Done: {m}", { m: mcOut.textContent }) : r.error, r.ok ? "ok" : "error");
+      } catch (err) { setText(mcOut, err.message); fail(err); }
     }
 
     async function check() {
@@ -90,6 +141,7 @@ export default {
     }
 
     showFacts();
+    showMc();
     loadTree();
     return {
       update(type) {
@@ -98,7 +150,7 @@ export default {
           showFacts();
           if (!before) loadTree();
         }
-        if (type === "run" || type === "config") showFacts();
+        if (type === "run" || type === "config" || type === "boards") { showFacts(); showMc(); }
       },
     };
   },

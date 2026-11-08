@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 
@@ -17,6 +18,8 @@ from alab_daq.core import config as C
 from alab_daq.web.settings import PROJECT, write_atomic
 
 CHECK_TIMEOUT_S = 20        # per board
+PARAM_PATH = re.compile(r"^/(par|ch/\d{1,2}(\.\.\d{1,2})?/par|endpoint/par)/[A-Za-z0-9_]{1,64}$")
+COMMAND = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 
 
 class CheckError(RuntimeError):
@@ -58,6 +61,7 @@ class BoardCheck:
         self.by = ""
         self.simulator = False
         self.trees_dir = station.state_dir / "trees"
+        self.param_busy = False
         self._load()
 
     def _file(self):
@@ -162,6 +166,60 @@ class BoardCheck:
             self._save()
             self.publish()
             st.config_changed()             # the configuration check compares with what the boards said
+
+    async def param(self, user: str, board: str, action: str, path: str, value: str = "") -> dict:
+        """The manual controller (WaveDump2's): get or set one parameter of an idle board, or send it a command,
+        through python -m alab_daq.daq param. The next run resets the board and sets it from the configuration."""
+        st = self.station
+        if st.runs.active is not None:
+            raise CheckError("not during a run: the DAQ program has the boards")
+        if self.running or self.param_busy:
+            raise CheckError("the boards are busy with a check; try again in a moment")
+        if st.cfg.board(board) is None:
+            raise CheckError(f"there is no board {board} in the configuration")
+        if action in ("get", "set") and not PARAM_PATH.match(path):
+            raise ValueError(f"{path}: a parameter is /par/NAME or /ch/N/par/NAME")
+        if action == "cmd" and not COMMAND.match(path):
+            raise ValueError(f"{path}: a command is a name, e.g. Reset (sent as /cmd/NAME)")
+        if action not in ("get", "set", "cmd"):
+            raise ValueError("the action is get, set or cmd")
+        value = str(value).strip()
+        if action == "set" and (not value or len(value) > 200 or "\n" in value):
+            raise ValueError("give the value to set (one line)")
+        cfg_path = str(st.state_dir / "param_config.json")
+        C.save_config(st.cfg, cfg_path)
+        cmd = [sys.executable, "-m", "alab_daq.daq", "param", cfg_path, "--board", board]
+        cmd += {"get": ["--get", path], "set": ["--set", path, value], "cmd": ["--cmd", path]}[action]
+        if st.settings.use_simulator:
+            cmd += ["--simulate", st.settings.simulator_options]
+        env = dict(os.environ, PYTHONPATH=str(PROJECT / "src"), PYTHONUNBUFFERED="1", OMP_NUM_THREADS="1",
+                   **st.settings.lib_env())
+        self.param_busy = True
+        try:
+            proc = await asyncio.create_subprocess_exec(*cmd, stdin=asyncio.subprocess.DEVNULL, env=env,
+                                                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            try:
+                out, _ = await asyncio.wait_for(proc.communicate(), CHECK_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                proc.kill()
+                raise CheckError(f"{board} did not answer within {CHECK_TIMEOUT_S} s") from None
+        finally:
+            self.param_busy = False
+        lines = out.decode("utf-8", "replace").strip().splitlines()
+        res = None
+        for line in reversed(lines):
+            try:
+                res = json.loads(line)
+                break
+            except ValueError:
+                continue
+        if not isinstance(res, dict):
+            res = {"ok": False, "error": " ".join(lines[-3:]) or "no answer"}
+        if action != "get":
+            what = f"{path} = {value}" if action == "set" else f"command {path}"
+            st.activity(user, "manual controller", f"{board}: {what}: {'ok' if res.get('ok') else res.get('error', 'refused')}")
+        res["simulator"] = st.settings.use_simulator
+        return res
 
     def tree(self, name: str) -> dict:
         if self.station.cfg.board(name) is None and name not in self.results:

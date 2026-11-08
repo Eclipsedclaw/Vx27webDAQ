@@ -363,6 +363,19 @@ async def run_stop(request):
 
 
 @api("operator")
+async def run_control(request):
+    return await request.app["station"].runs.control(request["user"], await body(request))
+
+
+@api("operator")
+async def boards_param(request):
+    st: Station = request.app["station"]
+    data = await body(request)
+    return await st.boards.param(request["user"], str(data.get("board", "")), str(data.get("action", "")),
+                                 str(data.get("path", "")).strip(), str(data.get("value", "")))
+
+
+@api("operator")
 async def run_kill(request):
     request.app["station"].runs.kill(request["user"])
     return {"ok": True}
@@ -588,6 +601,8 @@ def create_app(station: Station | None = None) -> web.Application:
     r.add_post("/api/run/start", run_start)
     r.add_post("/api/run/stop", run_stop)
     r.add_post("/api/run/kill", run_kill)
+    r.add_post("/api/run/control", run_control)
+    r.add_post("/api/boards/param", boards_param)
     r.add_post("/api/boards/check", boards_check)
     r.add_get("/api/boards/tree", boards_tree)
     r.add_get("/api/config", get_config)

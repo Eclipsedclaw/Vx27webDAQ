@@ -119,6 +119,7 @@ class RunManager:
         self.lines: list = []                       # [number, text, error]
         self.line_no = 0
         self.live_seq = 0                           # goes up with every new event
+        self._control_seq = 0
         self._last_publish = 0.0
 
     # ---- before a run ----
@@ -264,6 +265,58 @@ class RunManager:
         a.killed_by = user
         self.station.activity(user, "killed the DAQ program", a.run_dir)
         self.publish_state()
+
+    async def control(self, user: str, data: dict) -> dict:
+        """A command to the DAQ program during the run (its control folder): a Force trigger, or a channel's DC
+        offset or threshold. A change also goes into the run's configuration here (the dashed lines follow) and,
+        with keep, into the configuration being edited, for the next runs."""
+        a = self._need_active()
+        if a.status.get("phase") != "running":
+            raise RunError("the boards are not taking data yet")
+        cmd = data.get("cmd")
+        req: dict = {"cmd": cmd, "user": user}
+        if cmd == "set":
+            name, what = str(data.get("board", "")), str(data.get("what", ""))
+            channel, value = int(data.get("channel", -1)), float(data.get("value", "nan"))
+            b = a.cfg.board(name)
+            if b is None:
+                raise RunError(f"there is no board {name} in this run")
+            path, val = C.live_setting(b, channel, what, value)
+            req.update(board=name, path=path, value=val)
+        elif cmd != "swtrigger":
+            raise ValueError("cmd is swtrigger or set")
+        self._control_seq += 1
+        name_ = f"{int(time.time() * 1000):013d}_{self._control_seq:04d}"
+        write_atomic(os.path.join(a.path("control"), name_ + ".json"), json.dumps(req), private=False)
+        done = os.path.join(a.path("control"), name_ + ".done")
+        res = None
+        for _ in range(60):
+            await asyncio.sleep(0.1)
+            try:
+                with open(done, encoding="utf-8") as f:
+                    res = json.load(f)
+                os.remove(done)
+                break
+            except (OSError, ValueError):
+                continue
+        if res is None:
+            raise RunError("the DAQ program did not answer within 6 s")
+        if cmd == "set" and res.get("ok"):
+            attr = "dc_offset" if req["path"].endswith("DCOffset") else "threshold"
+            new = round(value, 3) if attr == "dc_offset" else int(value)
+            setattr(a.cfg.board(name).channels[channel], attr, new)
+            st, keep = self.station, bool(data.get("keep", True))
+            sb = st.cfg.board(name)
+            if keep and sb is not None and channel < len(sb.channels):
+                setattr(sb.channels[channel], attr, new)
+                st.cfg_dirty = True
+                st.config_changed()
+            res["kept"] = keep
+            self.station.activity(user, "changed during the run", f"{name} ch{channel} {attr} = {new}")
+            self.live_seq += 1
+        elif cmd == "swtrigger":
+            self.station.activity(user, "Force trigger", res.get("message", ""))
+        return res
 
     def _need_active(self) -> Active:
         if self.active is None:
@@ -425,7 +478,7 @@ class RunManager:
                    "exit_code": None if code == UNKNOWN_EXIT else code, "phase": phase,
                    "stop_reason": s.get("stop_reason"), "t": s.get("t"), "duration": a.cfg.run.duration_s,
                    "events": s.get("events", 0), "bytes": s.get("bytes", 0), "boards": boards,
-                   "matching": s.get("matching"), "data_files": files, "side_files": [side_json(p) for p in files],
+                   "matching": s.get("matching"), "changes": s.get("changes", []), "data_files": files, "side_files": [side_json(p) for p in files],
                    "errors": errors, "warnings": s.get("warnings", [])}
         write_atomic(a.path("run.json"), json.dumps(summary, indent=2) + "\n", private=False)
         try:
@@ -499,6 +552,7 @@ class RunManager:
                "duration": a.cfg.run.duration_s, "max_events": a.cfg.run.max_events, "events": s.get("events", 0),
                "bytes": s.get("bytes", 0), "data_files": files, "write_raw": a.cfg.run.write_raw,
                "sync": a.cfg.run.sync, "setup": a.cfg.trigger.setup, "matching": s.get("matching"),
+               "force_targets": s.get("force_targets", []), "changes": s.get("changes", [])[-20:],
                "stop_sent_at": a.stop_sent_at, "stopped_by": a.stopped_by, "kill_after_s": KILL_AFTER_S,
                "now": time.time(), "reattached": a.reattached, "errors": (errors or s.get("errors", []))[-5:],
                "warnings": s.get("warnings", [])[-5:], "stop_reason": s.get("stop_reason"),

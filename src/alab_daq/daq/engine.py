@@ -10,6 +10,8 @@ run's name). The program prints its log (the server keeps it as daq.log) and wri
                      and the sync check (sync.py)
     live/NAME.evt    the newest event of each board, as the board sent it (the page's live waveforms)
     live/combined.set  one event of every board from the same moment (the page's combined view; write_set)
+    control/N.done   the answer to the server's command control/N.json during the run: a Force trigger, or a
+                     channel's DC offset or threshold (poll_control); every change is logged and kept in status
 and the data, one stream per board, as the board sent it: DATA_FOLDER/RUN_NAME_BOARD.raw (and _001.raw ...
 when a file reaches file_mb). See core/rawdata.py. Every board's housekeeping (temperatures, fans, DC-DC, error
 flags, trigger and lost-trigger counters, dead time; boards.HK) every run.hk_s seconds goes into
@@ -48,6 +50,7 @@ STOP_WAIT_S = 10.0          # after the stop command: how long a board may take 
 STATUS_S = 0.5
 LIVE_S = 0.25               # the newest event of a board is written at most this often
 SYNC_S = 0.5                # how often the sync check counts the triggers every board has passed
+LIVE_PARAMS = ("dcoffset", "triggerthr")       # what the server may change while the boards run
 STAT_KEYS = ("events", "icr_hz", "rate_hz", "dead_frac")      # derived columns of the housekeeping file
 SILENT_WARN_S = 5.0         # a board without any data this long after the start gets a warning
 RATE_WINDOW_S = 10.0
@@ -185,6 +188,8 @@ class Run:
         self.status_path = os.path.join(self.run_dir, "status.json")
         self._last_status = 0.0
         self.set_cell = None            # the cell of the last live/combined.set
+        self.control_dir = os.path.join(self.run_dir, "control")
+        self.changes: list[dict] = []   # what was changed during the run (poll_control)
         self.sync = (SyncCheck([b.name for b in self.boards], self.cfg.run.sync_window_ns)
                      if len(self.boards) > 1 and C.common_trigger(self.cfg) else None)
 
@@ -212,7 +217,8 @@ class Run:
                                                                 else "each board triggers by itself"},
                 "events": sum(b["events"] for b in boards), "bytes": sum(b["bytes"] for b in boards),
                 "stop_reason": self.stop_reason, "stop_requested": self.stop_requested,
-                "errors": self.errors[-20:], "warnings": self.warnings[-20:], "time": time.time()}
+                "errors": self.errors[-20:], "warnings": self.warnings[-20:], "time": time.time(),
+                "changes": self.changes[-200:], "force_targets": [self.boards[k].name for k in C.force_targets(self.cfg)]}
         try:
             write_json(self.status_path, data)
         except OSError as err:
@@ -233,6 +239,7 @@ class Run:
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, self.on_signal)
         os.makedirs(self.live_dir, exist_ok=True)
+        os.makedirs(self.control_dir, exist_ok=True)
         cfg = self.cfg
         self.log(f"ALAB DAQ v{__version__}: run {self.run_name}, {len(self.boards)} board(s), "
                  f"{'clock chain' if self.chained else 'independent boards' if len(self.boards) > 1 else 'one board'}, "
@@ -549,6 +556,67 @@ class Run:
                      + ", ".join(f"{n} {ts}" for n, ts in fb["timestamps"].items())
                      + f" (8 ns ticks): more than {self.cfg.run.sync_window_ns} ns apart", "warning")
 
+    # ---- commands of the server during the run ----
+    def poll_control(self) -> None:
+        """Do the server's commands (control/N.json, in order) and answer each in control/N.done."""
+        try:
+            names = sorted(n for n in os.listdir(self.control_dir) if n.endswith(".json"))
+        except OSError:
+            return
+        for n in names:
+            path = os.path.join(self.control_dir, n)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    req = json.load(f)
+            except (OSError, ValueError):
+                req = None
+            res = self.do_control(req) if isinstance(req, dict) else {"ok": False, "message": "not a command"}
+            try:
+                write_json(path[:-5] + ".done", res)
+                os.remove(path)
+            except OSError:
+                pass
+
+    def do_control(self, req: dict) -> dict:
+        who = str(req.get("user") or "?")[:40]
+        if self.phase != "running":
+            return {"ok": False, "message": f"the run is {self.phase}"}
+        if req.get("cmd") == "swtrigger":
+            targets = [self.boards[k] for k in C.force_targets(self.cfg)]
+            if not targets:
+                return {"ok": False, "message": "in this trigger setup the triggers come from outside: no software trigger"}
+            sent = []
+            for b in targets:
+                try:
+                    b.board.cmd("SendSwTrigger")
+                    sent.append(b.name)
+                except BoardError as err:
+                    self.log(f"{b.name}: {err}", "warning")
+            self.log(f"Force trigger ({who}): software trigger to {', '.join(sent) or 'no board'}")
+            return {"ok": bool(sent), "message": f"software trigger to {', '.join(sent)}" if sent else "no board took it",
+                    "boards": sent}
+        if req.get("cmd") == "set":
+            b = next((x for x in self.boards if x.name == req.get("board")), None)
+            path, value = str(req.get("path", "")), str(req.get("value", ""))
+            parts = path.split("/")
+            if b is None:
+                return {"ok": False, "message": f"no board {req.get('board')} in this run"}
+            if len(parts) != 5 or parts[1] != "ch" or not parts[2].isdigit() or parts[4].lower() not in LIVE_PARAMS:
+                return {"ok": False, "message": f"{path}: only a channel's DCOffset or TriggerThr changes during a run"}
+            change = {"time": time.time(), "user": who, "board": b.name, "path": path, "value": value}
+            try:
+                b.board.set(path, value)
+                change["read_back"] = b.board.get(path)
+                change["ok"] = True
+                self.log(f"changed during the run ({who}): {b.name} {path} = {value}")
+            except BoardError as err:
+                change.update(ok=False, error=str(err))
+                self.log(f"{b.name}: the board refused {path} = {value} during the run: {err}", "warning")
+            self.changes.append(change)
+            return {"ok": change["ok"], "message": change.get("error") or f"{b.name} {path} = {change.get('read_back', value)}",
+                    "value": change.get("read_back")}
+        return {"ok": False, "message": f"unknown command {req.get('cmd')}"}
+
     # ---- housekeeping ----
     def sample_hk(self, b: BoardRun, now: float) -> None:
         """The board's housekeeping: into b.monitors and b.stats (status.json), and a row of its _hk.csv."""
@@ -683,6 +751,7 @@ class Run:
             if now >= next_sync:
                 next_sync = now + SYNC_S
                 self.check_sync()
+            self.poll_control()
             if now >= next_set:
                 next_set = now + SET_S
                 self.write_set()

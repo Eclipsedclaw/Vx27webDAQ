@@ -416,9 +416,14 @@ def plan(cfg: DaqConfig, k: int, facts: models.Model | None = None) -> list[Sett
     last = k == n - 1
     pass_on = n > 1                         # TRG-OUT -> TRG-IN of the next board, with or without the clock chain
     own = triggers_on_channels(cfg, k)
+    force = Setting("/par/AcqTriggerSource", "ITLA|SwTrg", "own channels (ITLA), and Force trigger (SwTrg)",
+                    alt=[Setting("/par/AcqTriggerSource", "ITLA", "own channels (ITLA)")])
     if trg.setup == "master":
         if k == 0:
-            put("/par/AcqTriggerSource", "ITLA", "own channels (ITLA)")
+            if trg.master_out == "AcceptTrg":       # a forced trigger then reaches every board
+                out.append(force)
+            else:
+                put("/par/AcqTriggerSource", "ITLA", "own channels (ITLA)")
             put("/par/TrgOutMode", trg.master_out if pass_on else "Disabled",
                 "TRG-OUT sends the master's trigger to the next board" if pass_on else "end of the trigger chain")
         else:
@@ -430,7 +435,7 @@ def plan(cfg: DaqConfig, k: int, facts: models.Model | None = None) -> list[Sett
         put("/par/TrgOutMode", "Disabled" if last or not pass_on else "TrgIn",
             "end of the trigger chain" if last or not pass_on else "TRG-OUT passes TRG-IN to the next board")
     elif trg.setup == "self":
-        put("/par/AcqTriggerSource", "ITLA", "own channels (ITLA)")
+        out.append(force)
         put("/par/TrgOutMode", "Disabled", "")
     elif trg.setup == "logic_or":
         put("/par/AcqTriggerSource", "TrgIn", "the common trigger from the logic unit on TRG-IN")
@@ -492,6 +497,35 @@ def start_order(cfg: DaqConfig) -> list[int]:
     chain, else every board."""
     n = len(cfg.active())
     return [0] if cfg.run.sync == "chain" and n > 1 else list(range(n))
+
+
+def force_targets(cfg: DaqConfig) -> list[int]:
+    """The boards a Force trigger (one software trigger, from the Run page) goes to: the ones that make the triggers
+    and accept SwTrg. None when the triggers come from outside (external, logic unit) or from the test pulse."""
+    t, n = cfg.trigger, len(cfg.active())
+    if t.setup == "master":           # with ITLA on TRG-OUT a software trigger would reach the master alone, and its
+        return [0] if n and t.master_out == "AcceptTrg" else []     # trigger IDs would no longer match the others'
+    if t.setup == "self":
+        return list(range(n))
+    if t.setup == "periodic" and t.periodic_source == "software":
+        return software_targets(cfg)
+    return []
+
+
+def live_setting(board: Board, channel: int, what: str, value: float) -> tuple[str, str]:
+    """(path, value) that changes a channel's DC offset or threshold during a run, as plan() sets it."""
+    if not 0 <= channel < len(board.channels):
+        raise ConfigError(f"{board.name} has no channel {channel}")
+    ch = board.channels[channel]
+    if what == "dc_offset":
+        if not 0 <= value <= 100:
+            raise ConfigError("a DC offset is from 0 to 100 %")
+        return f"/ch/{channel}/par/DCOffset", str(round(float(value), 3))
+    if what == "threshold":
+        if not 0 <= value <= 65535 or value != int(value):
+            raise ConfigError("a threshold is a whole number of ADC counts from 0")
+        return f"/ch/{channel}/par/TriggerThr", str(int(value) if ch.positive else -int(value))
+    raise ConfigError(f"{what}: only dc_offset and threshold change during a run")
 
 
 def software_targets(cfg: DaqConfig) -> list[int]:

@@ -6,10 +6,10 @@
 // of them to the same samples, which the server sends in full detail; in Measure mode a drag marks the same range
 // on every plot, and the table under the plots gives its numbers per channel (from all the samples). The x axes
 // give each sample's time from the trigger too (the board's own sample time: 2 ns on a V2730, 8 ns on a V2740).
-import { get } from "./api.js";
+import { get, post } from "./api.js";
 import { T, t } from "./i18n.js";
 import { ADC_MAX, SAMPLE_NS, WavePlot, fmtTime } from "./plots.js";
-import { basename, chip, chooseFile, clear, fail, fmtInt, fmtNum, h, icon, segmented, setText, splitter, store } from "./ui.js";
+import { basename, chip, chooseFile, clear, fail, fmtInt, fmtNum, h, icon, segmented, setText, splitter, store, toast } from "./ui.js";
 import { MAX_SHOWN, channelPicker, defaultChannels, rangesText } from "./chanpick.js";
 import { combinedView } from "./combined.js";
 
@@ -86,13 +86,27 @@ export function wavePanel(app, { onBoard } = {}) {
   mouseSeg.title = t("What a drag across a plot does: zoom all plots to that range, or measure that range on all plots. The mouse wheel over a plot zooms the time axis in either mode.");
   const resetBtn = h("button.btn.btn-sm", { type: "button", onclick: () => { resetZoom(); load(true); },
                                             title: t("Every plot back to the whole waveform and the ADC range chosen here") }, icon("reset"), t("Reset zoom"));
+  // tuning during the run (operators): a shown channel's DC offset or threshold, like WaveDump2's oscilloscope tools
+  const tuneBtn = h("button.btn.btn-sm", { type: "button", "aria-expanded": "false", onclick: () => toggleTune(),
+                                          title: t("Change a channel's DC offset or threshold while the run goes") }, icon("sliders"), t("Tune…"));
+  const tuneCh = h("select.input", { "aria-label": t("Channel"), onchange: () => fillTune() });
+  const tuneDc = h("input.input.num", { type: "number", min: "0", max: "100", step: "0.1", style: "width:90px", "aria-label": t("DC offset") });
+  const tuneThr = h("input.input.num", { type: "number", min: "0", max: "65535", step: "1", style: "width:90px", "aria-label": t("threshold") });
+  const tuneKeep = h("input", { type: "checkbox", checked: true });
+  const tuneMsg = h("span.text2.small");
+  const tuneDcBtn = h("button.btn.btn-sm", { type: "button", onclick: () => tuneSet("dc_offset", tuneDc.value) }, t("Set"));
+  const tuneThrBtn = h("button.btn.btn-sm", { type: "button", onclick: () => tuneSet("threshold", tuneThr.value) }, t("Set"));
+  const tuneBox = h("div.chan-box.hidden", h("div.row.wrap", h("b.small", t("While the run goes:")), h("span.label", t("Channel")), tuneCh,
+    h("span.label", t("DC offset")), tuneDc, h("span.text2", "%"), tuneDcBtn,
+    h("span.label", t("threshold")), tuneThr, h("span.text2.small", t("counts")), tuneThrBtn,
+    h("label.row.nowrap", { title: t("Also into the configuration being edited, so the next runs use it") }, tuneKeep, t("keep for the next runs")), tuneMsg));
   const boardGroup = h("div.group", h("span.label", t("Board")), boardSel);
   const chanGroup = h("div.group", h("span.label", t("Channels")), pickBtn);
   const howRow = h("div.toolbar-row",
       h("div.group", h("span.label", t("ADC range")), rangeSeg, customBox, halfBox),
       h("div.group", h("span.label", t("Lines")), trigLineBtn, thrLineBtn),
       h("div.group", h("span.label", t("Mouse")), mouseSeg),
-      h("span.spacer"), resetBtn);
+      h("span.spacer"), app.can("control") ? tuneBtn : null, resetBtn);
   panel.appendChild(h("div.toolbar.two-rows",
     h("div.toolbar-row",
       h("h2.card-title", t("Waveforms")), viewSeg,
@@ -100,6 +114,7 @@ export function wavePanel(app, { onBoard } = {}) {
       evGroup, h("span.spacer"), pauseBtn, allBtn),
     howRow));
   panel.appendChild(pickBox);
+  panel.appendChild(tuneBox);
   panel.appendChild(sub);
   const combo = combinedView(app, { getSource: () => ({ source, file }) });
 
@@ -175,11 +190,13 @@ export function wavePanel(app, { onBoard } = {}) {
     sel = Array.isArray(kept) ? kept.filter((c) => Number.isInteger(c) && c >= 0 && c < nChannels).slice(0, MAX_SHOWN)
                               : defaultChannels(nChannels, boardEnabled());
     showPick();
+    if (!tuneBox.classList.contains("hidden")) fillTune();
   }
 
   function setSel(list) {
     sel = list.slice(0, MAX_SHOWN);
     store(`wave.sel.${boardSel.value}`, JSON.stringify(sel));
+    if (!tuneBox.classList.contains("hidden")) fillTune();
     if (enlarged !== null) enlarged = null;
     setText(pickText, sel.length ? `${rangesText(sel)} (${sel.length})` : t("none"));
     showCards();
@@ -199,13 +216,50 @@ export function wavePanel(app, { onBoard } = {}) {
     layout();
   }
 
+  function toggleTune(open) {
+    const showIt = open ?? tuneBox.classList.contains("hidden");
+    tuneBox.classList.toggle("hidden", !showIt);
+    tuneBtn.classList.toggle("on", showIt);
+    tuneBtn.setAttribute("aria-expanded", showIt ? "true" : "false");
+    if (showIt) fillTune();
+    layout();
+  }
+
+  function fillTune() {
+    const keep = tuneCh.value;
+    clear(tuneCh, channelsShown().map((c) => h("option", { value: String(c) }, `ch${c}`)));
+    if ([...tuneCh.options].some((o) => o.value === keep)) tuneCh.value = keep;
+    const b = app.state.config.config.boards.find((x) => x.name === boardSel.value);
+    const ch = b && b.channels[Number(tuneCh.value)];
+    if (ch) { tuneDc.value = String(ch.dc_offset); tuneThr.value = String(ch.threshold); }
+    showTune();
+  }
+
+  function showTune() {
+    const r = app.state.run, running = Boolean(r && r.active && r.phase === "running");
+    const ok = running && source === "live" && app.can("control") && tuneCh.options.length > 0;
+    for (const x of [tuneDcBtn, tuneThrBtn]) x.disabled = !ok;
+    if (!running) setText(tuneMsg, t("during a run: the change goes to the board at once"));
+  }
+
+  async function tuneSet(what, value) {
+    if (value === "" || !Number.isFinite(Number(value))) return;
+    try {
+      const r = await post("/api/run/control", { cmd: "set", board: boardSel.value, channel: Number(tuneCh.value), what,
+                                                 value: Number(value), keep: tuneKeep.checked });
+      setText(tuneMsg, r.ok ? t("done: {m}", { m: r.message }) + (r.kept ? ` · ${t("kept for the next runs")}` : "") : r.message);
+      toast(r.ok ? t("Changed during the run: {m}", { m: r.message }) : r.message, r.ok ? "ok" : "error");
+      load(true);
+    } catch (err) { fail(err); }
+  }
+
   function setView(v) {
     viewMode = v;
     store("wave.view", v);
     viewSeg.set(v);
     const comb = v === "combined";
     for (const x of [boardGroup, chanGroup, howRow, sub, body]) x.classList.toggle("hidden", comb);
-    if (comb) togglePicker(false);
+    if (comb) { togglePicker(false); toggleTune(false); }
     combo.setActive(comb);
     showControls();
     if (!comb) { layout(); load(true); }
@@ -539,7 +593,8 @@ export function wavePanel(app, { onBoard } = {}) {
     board: () => boardSel.value,
     update(type) {
       if (type === "config" && source === "live") { fillBoards(); showCards(); showControls(); }
-      if (type === "run") showControls();
+      if (type === "run") { showControls(); showTune(); }
+      if (type === "config" && !tuneBox.classList.contains("hidden")) fillTune();
       combo.update(type);
     },
     restyle() { cards.forEach((c) => { c.plot.restyle(); c.plot.setRange(range); c.plot.setShow(lines); c.plot.setMouse(mouse); c.plot.setSpan(span); }); load(true); combo.restyle(); },

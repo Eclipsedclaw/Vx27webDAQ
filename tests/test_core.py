@@ -239,12 +239,18 @@ class ConfigTests(unittest.TestCase):
         v = [self.values(cfg, k) for k in range(3)]
         self.assertEqual([(x["/par/AcqTriggerSource"], x["/par/TrgOutMode"]) for x in v],
                          [("ITLA", "ITLA"), ("TrgIn", "TrgIn"), ("TrgIn", "Disabled")])
+        self.assertEqual(C.force_targets(cfg), [])        # ITLA on TRG-OUT: a forced trigger would reach only the master
+        self.assertEqual(C.live_setting(cfg.boards[0], 3, "threshold", 80), ("/ch/3/par/TriggerThr", "-80"))
+        self.assertEqual(C.live_setting(cfg.boards[0], 3, "dc_offset", 61.25), ("/ch/3/par/DCOffset", "61.25"))
+        with self.assertRaises(C.ConfigError):
+            C.live_setting(cfg.boards[0], 16, "threshold", 80)       # a VX2730 of 16 inputs
         self.assertEqual((v[0]["/ch/0..15/par/TriggerThr"], v[0]["/ch/0..15/par/ITLConnect"]), ("-100", "ITLA"))
         self.assertNotIn("/par/ITLAMainLogic", v[1])                       # only the master triggers on channels
         self.assertFalse(any("TriggerThr" in p for p in v[2]))
         self.assertEqual([C.triggers_on_channels(cfg, k) for k in range(3)], [True, False, False])
         cfg.trigger.master_out = "AcceptTrg"
         self.assertEqual(self.values(cfg, 0)["/par/TrgOutMode"], "AcceptTrg")
+        self.assertEqual((self.values(cfg, 0)["/par/AcqTriggerSource"], C.force_targets(cfg)), ("ITLA|SwTrg", [0]))
         # a board that says it has 32 channels where the configuration has 16
         where = {p.where for p in C.check_config(cfg, check_paths=False, facts={"vx2730": {"model": "VX2730", "channels": 32}})}
         self.assertIn("boards[0].n_channels", where)
@@ -479,6 +485,59 @@ class DaqRunTests(unittest.TestCase):
         code, log, status, d = run_daq("hk_self", cfg)
         self.assertEqual(code, 0, log)
         self.assertEqual(status["matching"], {"applies": False, "why": "each board triggers by itself"})
+
+    def test_control_during_the_run(self):
+        """The server's commands during a run: a Force trigger reaches every board (the master sends AcceptTrg),
+        a channel's DC offset changes, anything else is refused."""
+        cfg = small(C.lab_setup(), seconds=0)
+        cfg.trigger.master_out = "AcceptTrg"
+        d = folder("control")
+        cfg.run.data_dir = os.path.join(d, "raw")
+        os.makedirs(cfg.run.data_dir)
+        C.save_config(cfg, os.path.join(d, "config.json"), run_name="run00007")
+        env = dict(os.environ, PYTHONPATH=str(PROJECT / "src"), OMP_NUM_THREADS="1", PYTHONUNBUFFERED="1")
+        p = subprocess.Popen([sys.executable, "-m", "alab_daq.daq", "run", d, "--simulate", "--rate 5 --seed 2"], cwd=d,
+                             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            status = os.path.join(d, "status.json")
+            for _ in range(200):
+                time.sleep(0.05)
+                try:
+                    if json.load(open(status))["phase"] == "running":
+                        break
+                except (OSError, ValueError, KeyError):
+                    pass
+
+            def ask(n, req):
+                with open(os.path.join(d, "control", f"{n}.json.part"), "w") as f:
+                    json.dump(req, f)
+                os.replace(os.path.join(d, "control", f"{n}.json.part"), os.path.join(d, "control", f"{n}.json"))
+                for _ in range(100):
+                    time.sleep(0.05)
+                    try:
+                        return json.load(open(os.path.join(d, "control", f"{n}.done")))
+                    except (OSError, ValueError):
+                        pass
+                self.fail(f"no answer to {req}")
+            r = ask("001", {"cmd": "swtrigger", "user": "tester"})
+            self.assertEqual((r["ok"], r["boards"]), (True, ["vx2730"]))
+            r = ask("002", {"cmd": "set", "user": "tester", "board": "vx2730", "path": "/ch/0/par/DCOffset", "value": "61.5"})
+            self.assertEqual((r["ok"], r["value"]), (True, "61.500"))
+            r = ask("003", {"cmd": "set", "user": "tester", "board": "vx2730", "path": "/par/RecordLengthS", "value": "64"})
+            self.assertFalse(r["ok"])
+            time.sleep(0.5)
+        finally:
+            p.send_signal(signal.SIGTERM)
+            out, _ = p.communicate(timeout=60)
+        self.assertEqual(p.returncode, 0, out)
+        self.assertIn("Force trigger (tester): software trigger to vx2730", out)
+        self.assertIn("changed during the run (tester): vx2730 /ch/0/par/DCOffset = 61.5", out)
+        st = json.load(open(os.path.join(d, "status.json")))
+        self.assertEqual([(c["board"], c["path"], c["ok"]) for c in st["changes"]], [("vx2730", "/ch/0/par/DCOffset", True)])
+        m = st["matching"]                                     # the forced trigger is on every board too
+        self.assertEqual((m["out_of_sync"], set(m["missing"].values())), (0, {0}))
+        counts = {b["name"]: b["events"] for b in st["boards"]}
+        self.assertEqual(len(set(counts.values())), 1, counts)
 
     def test_periodic(self):
         cfg = small(C.default_config())

@@ -5,6 +5,10 @@ What changed in each version of ALAB DAQ. Write the notes of the next version un
 
 ## Unreleased
 
+## v0.0.6 (2026-11-08)
+
+- Live controls and manual controller. During a run the server gives the DAQ program commands through the run's `control/` folder: **Force trigger** (a software trigger to `C.force_targets`: the master with AcceptTrg on TRG-OUT, which then also accepts SwTrg; every board when each triggers by itself) and **Tune…** on the waveforms (a channel's DCOffset or TriggerThr at once; *keep for the next runs* into the configuration); every change is logged and kept in status.json and run.json. The Boards tool's **manual controller** gets or sets one parameter of an idle board or sends it a command (`python -m alab_daq.daq param`); the simulated boards' parameter trees have types, allowed values, ranges and descriptions.
+
 ## v0.0.5 (2026-11-08)
 
 - Housekeeping, statistics and sync check. Every board's housekeeping (all temperature sensors, fans, DC-DC, ErrorFlags, AcquisitionStatus, TriggerCnt, LostTriggerCnt, real/dead/live time, each channel's SelfTrgRate) every `run.hk_s` seconds into `RUN_BOARD_hk.csv` beside its data and into its ROOT file (TTree `hk`), shown in the new tool **Board housekeeping** (live or for a data file) and by Check boards; warnings for error flags, the board-fail bit of the events and an optional temperature (`run.temp_warn_c`). Statistics per board on the Run page: triggers counted, lost, incoming rate, dead time. The sync check (`daq/sync.py`): with one trigger for all boards, every trigger ID every board has passed is counted as on every board within `run.sync_window_ns`, out of sync, or missing on a board, with each board's timestamp difference from the first; shown on the Run page and summed up in the DAQ output and run.json.

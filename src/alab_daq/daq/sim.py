@@ -63,12 +63,16 @@ def _bool(text):
     raise ValueError("must be True or False")
 
 
+_bool.meta = {"datatype": "BOOL", "allowedvalues": ["True", "False"]}
+
+
 def _int(lo, hi):
     def check(text):
         x = float(text)
         if x != int(x) or not lo <= x <= hi:
             raise ValueError(f"must be a whole number from {lo} to {hi}")
         return str(int(x))
+    check.meta = {"datatype": "NUMBER", "minvalue": lo, "maxvalue": hi, "increment": 1}
     return check
 
 
@@ -80,6 +84,7 @@ def _float(lo, hi, step=None):
         if step:
             x = round(x / step) * step
         return f"{x:.3f}"
+    check.meta = {"datatype": "NUMBER", "minvalue": lo, "maxvalue": hi, "increment": step or 0.001}
     return check
 
 
@@ -91,6 +96,7 @@ def _choice(options):
         if t not in low:
             raise ValueError(f"must be one of {', '.join(options)}")
         return low[t]
+    check.meta = {"datatype": "STRING", "allowedvalues": list(options)}
     return check
 
 
@@ -102,6 +108,7 @@ def _combo(options):
         if not parts:
             raise ValueError("no value")
         return "|".join(one(p) for p in parts)
+    check.meta = {"datatype": "STRING", "allowedvalues": list(options), "multiple": True}
     return check
 
 
@@ -110,6 +117,21 @@ def _mask(text):
     if not 0 <= x < 1 << 64:
         raise ValueError("must be a 64-bit mask")
     return f"0x{x:x}"
+
+
+_mask.meta = {"datatype": "NUMBER", "minvalue": 0, "maxvalue": "0xFFFFFFFFFFFFFFFF"}
+DESCRIPTIONS = {"acqtriggersource": "the sources of the acquisition trigger (several with |)",
+                "trgoutmode": "the signal on the TRG-OUT connector", "gpiomode": "the signal on the GPIO connector",
+                "startsource": "what starts the acquisition", "syncoutmode": "the signal sent on CLK-OUT with the clock",
+                "clocksource": "the board's clock: its own or CLK-IN", "vetosource": "what vetoes the acquisition",
+                "testpulseperiod": "period of the internal test pulse (ns)", "testpulsewidth": "its width (ns)",
+                "dacoutmode": "what the DAC OUT connector puts out", "recordlengths": "record length in samples",
+                "pretriggers": "samples before the trigger", "chenable": "the channel is read out",
+                "dcoffset": "baseline position in % of the input range", "triggerthr": "self-trigger threshold",
+                "selftriggeredge": "the edge that triggers", "itlconnect": "which trigger logic the channel joins",
+                "tempsenscore": "temperature of the FPGA core (°C)", "errorflags": "the board's error flags",
+                "triggercnt": "triggers counted in the run", "losttriggercnt": "triggers lost in the run",
+                "selftrgrate": "self-trigger rate of the channel (Hz)"}
 
 
 def board_params(m: models.Model) -> dict:
@@ -609,7 +631,8 @@ class SimBoard:
         def node(table, values):
             out = {}
             for k, (check, _) in table.items():
-                out[k] = {"value": values.get(k, ""), "accessmode": "READ_ONLY" if check is None else "READ_WRITE"}
+                out[k] = {"value": values.get(k, ""), "accessmode": "READ_ONLY" if check is None else "READ_WRITE",
+                          **getattr(check, "meta", {}), "description": DESCRIPTIONS.get(k, "")}
             return out
         vals = dict(self.values, modelname=self.model_name, serialnum=self.serial)
         tree = {"par": node(self.bp, vals),

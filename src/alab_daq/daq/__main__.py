@@ -2,6 +2,8 @@
 
     python -m alab_daq.daq run RUN_FOLDER [--simulate "OPTIONS"]
         one run of the boards of RUN_FOLDER/config.json (see engine.py); the web server starts it
+    python -m alab_daq.daq param CONFIG.json --board NAME (--get PATH | --set PATH VALUE | --cmd COMMAND)
+        one parameter of one board, or one command to it (the Boards tool's manual controller; not during a run)
     python -m alab_daq.daq check CONFIG.json [--simulate "OPTIONS"] [--trees FOLDER] [--board NAME]...
         connect to each board of a configuration (or the ones named), print one JSON line per board with what
         it says it is (model, serial, firmware, channels, temperatures), and save its parameter tree as
@@ -63,6 +65,44 @@ def check(args) -> int:
     return code
 
 
+def param(args) -> int:
+    """Get or set one parameter of one board, or send it a command: one JSON line {ok, value | error}."""
+    from alab_daq.core import config as C
+    from alab_daq.daq.boards import BoardError, open_board
+    try:
+        cfg, _ = C.load_config(args.config)
+    except (OSError, C.ConfigError) as err:
+        print(json.dumps({"ok": False, "error": str(err)}), flush=True)
+        return 1
+    b = cfg.board(args.board)
+    if b is None:
+        print(json.dumps({"ok": False, "error": f"no board {args.board} in the configuration"}), flush=True)
+        return 1
+    crate = None
+    if args.simulate is not None:
+        from alab_daq.daq.sim import Crate
+        crate = Crate(args.simulate, "none", {b.name: b.model}, {b.name: len(b.channels)})
+    out, board = {"board": b.name, "ok": False}, None
+    try:
+        board = open_board(b.uri, crate, b.name)
+        if args.get:
+            out.update(path=args.get, value=board.get(args.get))
+        elif args.set:
+            board.set(args.set[0], args.set[1])
+            out.update(path=args.set[0], value=board.get(args.set[0]))
+        else:
+            board.cmd(args.cmd)
+            out.update(command=args.cmd)
+        out["ok"] = True
+    except BoardError as err:
+        out["error"] = str(err)
+    finally:
+        if board is not None:
+            board.close()
+    print(json.dumps(out), flush=True)
+    return 0 if out["ok"] else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m alab_daq.daq", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -75,6 +115,14 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--simulate", default=None, metavar="OPTIONS")
     c.add_argument("--trees", default=None, metavar="FOLDER", help="save each board's parameter tree here")
     c.add_argument("--board", action="append", default=[], help="only this board (by name); may repeat")
+    p = sub.add_parser("param", help="get or set one parameter of a board, or send it a command")
+    p.add_argument("config")
+    p.add_argument("--board", required=True)
+    p.add_argument("--simulate", default=None, metavar="OPTIONS")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--get", metavar="PATH")
+    g.add_argument("--set", nargs=2, metavar=("PATH", "VALUE"))
+    g.add_argument("--cmd", metavar="COMMAND")
     args = ap.parse_args(argv)
     if args.command == "run":
         from alab_daq.daq.engine import Run
@@ -84,6 +132,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: cannot read the run's configuration: {err}", flush=True)
             return 1
         return run.main()
+    if args.command == "param":
+        return param(args)
     return check(args)
 
 
