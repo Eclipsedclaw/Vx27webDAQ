@@ -23,6 +23,12 @@ const PERIODIC = [["software", T("software trigger")], ["test_pulse", T("test pu
 const TARGETS = [["each", T("each board")], ["chain", T("master, passed on TRG-OUT → TRG-IN")]];
 const LOGIC_TEXT = { OR: T("any channel"), AND: T("all channels"), Majority: T("at least N channels") };
 const MASTER_OUT_TEXT = { ITLA: T("its channel trigger (ITLA)"), AcceptTrg: T("the triggers it took (AcceptTrg)") };
+const COMBINE_TEXT = { A: T("logic A"), B: T("logic B"), A_AND_B: T("A AND B"), A_OR_B: T("A OR B") };
+const START_TEXT = { SINlevel: T("while S-IN is high"), SINedge: T("on the rising edge of S-IN"),
+                     FirstTrigger: T("on the first pulse on TRG-IN"), LVDS: T("on an LVDS signal"), P0: T("on the VME P0 signal") };
+const DAC_TEXT = { Static: T("a fixed level"), Ramp: T("a ramp over the ADC range"), Sin5MHz: T("a 5 MHz sine"),
+                   Square: T("a square wave"), IPE: T("pulses (the pulse emulator)"), ChInput: T("a copy of a channel's input"),
+                   MemOccupancy: T("the memory occupancy"), ChSum: T("the sum of the channels"), OverThrSum: T("the channels over threshold") };
 
 function fmtNs(ns) {
   if (ns === null || ns === undefined || !Number.isFinite(ns)) return "—";
@@ -186,6 +192,19 @@ export function configPage(root, app) {
       if (g.logic === "Majority") tg.append(...field(t("majority"), number(() => g.majority, (v) => { g.majority = v; }, "trigger.majority", { lo: 1, hi: 64, width: "90px" }), t("channels needed at the same time")));
       tg.append(...field(t("gate"), [number(() => g.gate_ns, (v) => { g.gate_ns = v; }, "trigger.gate_ns", { lo: 8, hi: 1e6, width: "100px" }), h("span.text2", "ns")],
                          t("how long a channel's trigger stays open, for AND and majority (ITLAGateWidth)")));
+      const comb = segmented((c.combines || ["A"]).map((x) => [x, t(COMBINE_TEXT[x] || x)]), g.combine, (v) => { g.combine = v; edited(true); build(); },
+                             { disabled: !can, label: t("board trigger") });
+      inputs["trigger.combine"] = comb;
+      tg.append(...field(t("board trigger"), comb, t("from the two channel logics: logic A (ITLA, the one above) alone, logic B (ITLB) alone, both at once, or either; each channel joins group A or B (Channels: group)")));
+      if (g.combine !== "A") {
+        const lb = segmented(c.logics.map((l) => [l, `${l} · ${t(LOGIC_TEXT[l])}`]), g.logic_b, (v) => { g.logic_b = v; edited(true); build(); },
+                             { disabled: !can, label: t("channel logic B") });
+        inputs["trigger.logic_b"] = lb;
+        tg.append(...field(t("channel logic B"), lb, t("which of the channels of group B make logic B (ITLB)")));
+        if (g.logic_b === "Majority") tg.append(...field(t("majority B"), number(() => g.majority_b, (v) => { g.majority_b = v; }, "trigger.majority_b", { lo: 1, hi: 64, width: "90px" }), t("channels needed at the same time")));
+        tg.append(...field(t("gate B"), [number(() => g.gate_b_ns, (v) => { g.gate_b_ns = v; }, "trigger.gate_b_ns", { lo: 8, hi: 1e6, width: "100px" }), h("span.text2", "ns")],
+                           t("how long a channel's trigger stays open in logic B (ITLBGateWidth)")));
+      }
     }
     if (g.setup === "periodic") {
       const src = segmented(PERIODIC.map(([k, v]) => [k, t(v)]), g.periodic_source, (v) => { g.periodic_source = v; edited(true); build(); },
@@ -277,11 +296,45 @@ export function configPage(root, app) {
         ...field(t("clock-out delay"), [optional(() => b.clock_out_delay_ps, (v) => { b.clock_out_delay_ps = v; }, `boards[${i}].clock_out_delay_ps`, plan ? String(plan.clock_out_delay_ps) : "0", { float: true }), h("span.text2", "ps")],
                  t("empty: CAEN's value (−2148 ps on the master, −3111 ps in the middle, 0 at the end); steps of 74 ps; depends on the cables"))));
     delays.open = store(`config.delays.${i}`) === "1";
-    return h("div.cfg-board", { dataset: { board: String(i) } }, head, grid, delays, channelEditor(b, i, info), extraEditor(b, i), planBox(b, i));
+    return h("div.cfg-board", { dataset: { board: String(i) } }, head, grid, delays, ioEditor(b, i, info), channelEditor(b, i, info), extraEditor(b, i), planBox(b, i));
+  }
+
+  // the front panel of a board (WaveDump2's Board settings, Advanced): each signal as the trigger setup needs it,
+  // or as set here; and the test signals (the test pulse on TRG-OUT or GPIO, DAC OUT)
+  function ioEditor(b, i, info) {
+    const ch = app.state.config.io_choices || {};
+    const set = [["io_trg_out", "TRG-OUT"], ["io_gpio_out", "GPIO"], ["io_veto", t("veto")], ["io_start", t("start")],
+                 ["io_tstamp_reset", t("timestamp reset")], ["io_dac_out", "DAC OUT"]].filter(([k]) => b[k]).map(([k, n]) => `${n} ${b[k]}`);
+    const box = h("details.cfg-io", { ontoggle: () => store(`config.io.${i}`, box.open ? "1" : null) },
+      h("summary", icon("link"), t("Front panel and test signals"), set.length ? h("span.hint", ` · ${set.join(" · ")}`) : null));
+    box.open = store(`config.io.${i}`) === "1";
+    const opts = (list, empty, text = {}) => [["", empty], ...(list || []).map((v) => [v, text[v] ? `${v} · ${t(text[v])}` : v])];
+    const sel = (key, list, empty, text) => select(opts(list, empty, text), () => b[key] || "", (v) => { b[key] = v; }, `boards[${i}].${key}`, true);
+    const isMaster = info.place === 0;
+    const grid = h("div.form-grid",
+      ...field("TRG-OUT", sel("io_trg_out", ch.trg_out, t("as the trigger setup needs")),
+               t("TestPulse: the internal test pulse (period and width of the Trigger section), to see on a scope or to feed back into channels; Busy, Run, RefClk, …. In a trigger chain this board's TRG-OUT carries the trigger: leave it")),
+      ...field("GPIO", sel("io_gpio_out", ch.gpio, t("as the trigger setup needs")), t("the GPIO connector as an output (the busy veto uses it)")),
+      ...field(t("veto"), [sel("io_veto", ch.veto, t("none")),
+                           b.io_veto ? number(() => b.io_veto_width_ns, (v) => { b.io_veto_width_ns = v; }, `boards[${i}].io_veto_width_ns`, { lo: 0, hi: 1e9, width: "100px" }) : null,
+                           b.io_veto ? h("span.text2", t("ns (0: the board's)")) : null,
+                           b.io_veto ? sel("io_veto_polarity", ch.polarity, t("the board's polarity")) : null],
+               t("no data while this signal is on (S-IN, GPIO, LVDS, …)")),
+      isMaster ? field(t("start"), sel("io_start", ch.start, t("the DAQ starts the run (Start run)"), START_TEXT),
+                       t("a hardware start: the run (and the clock chain's run signal) begins on this signal; Stop still ends it")) : [],
+      ...field(t("timestamp reset"), sel("io_tstamp_reset", ch.tsreset, t("at the run start")), t("the timestamps count from this signal instead")),
+      ...field("DAC OUT", [sel("io_dac_out", ch.dac, t("not set"), DAC_TEXT),
+                         b.io_dac_out === "Static" ? number(() => b.io_dac_level, (v) => { b.io_dac_level = v; }, `boards[${i}].io_dac_level`, { lo: 0, hi: 65535, width: "100px" }) : null,
+                         b.io_dac_out === "ChInput" ? h("span.text2", t("channel")) : null,
+                         b.io_dac_out === "ChInput" ? number(() => b.io_dac_channel, (v) => { b.io_dac_channel = v; }, `boards[${i}].io_dac_channel`, { lo: 0, hi: 63, width: "80px" }) : null],
+               t("the analog test output (where the board has one): e.g. pulses into a channel of every board to see that they line up (the combined view, lined up by timestamps). If a board does not know the value it warns and runs without it")));
+    box.appendChild(grid);
+    return box;
   }
 
   function channelEditor(b, i, info) {
     const self = Boolean(info.self_trigger);         // this board triggers on its own channels
+    const groups = Boolean(model.trigger.combine) && model.trigger.combine !== "A";
     const nch = b.channels.length;
     const on = b.channels.filter((x) => x.enabled).length;
     const box = h("details.cfg-channels", { ontoggle: () => store(`config.channels.${i}`, box.open ? "1" : null) },
@@ -310,6 +363,7 @@ export function configPage(root, app) {
                    h("th", { title: t("ADC counts from the channel's baseline, in the direction of its pulses (not an ADC level)") }, t("threshold")),
                    h("th", { title: t("Ticked: positive pulses (rising edge, above the baseline); else negative pulses") }, t("positive")),
                    self ? h("th", { title: t("Takes part in the board's trigger (the channel logic of the Trigger section)") }, t("in trigger")) : null,
+                   self && groups ? h("th", { title: t("The channel logic it joins: A (ITLA) or B (ITLB)") }, t("group")) : null,
                    info.gain ? h("th", t("gain dB")) : null);
     const rows = b.channels.map((ch, k) => {
       const w = `boards[${i}].channels[${k}]`;
@@ -322,6 +376,7 @@ export function configPage(root, app) {
                h("td", number(() => ch.dc_offset, (v) => { ch.dc_offset = v; }, `${w}.dc_offset`, { lo: 0, hi: 100, step: 0.1, float: true, width: "80px" })),
                h("td", number(() => ch.threshold, (v) => { ch.threshold = v; }, `${w}.threshold`, { lo: 0, hi: 65535, width: "90px" })),
                cb("positive", t("positive")), self ? cb("self_trigger", t("in trigger")) : null,
+               self && groups ? h("td", select([["A", "A"], ["B", "B"]], () => ch.itl || "A", (v) => { ch.itl = v; }, `${w}.itl`, false)) : null,
                info.gain ? h("td", number(() => ch.gain, (v) => { ch.gain = v; }, `${w}.gain`, { lo: 0, hi: 40, step: 0.5, float: true, width: "80px" })) : null);
     });
     box.appendChild(h("div.table-wrap.ch-wrap", h("table.ch-table.ch-list", h("thead", head), h("tbody", rows))));

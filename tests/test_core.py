@@ -293,6 +293,11 @@ class SyncCheckTests(unittest.TestCase):
         self.assertIn("missing: a 1", s.summary())
 
 
+def plan_values(cfg: C.DaqConfig, k: int) -> dict:
+    """path -> value of what plan() gives board k (the last setting of a path wins, as on the board)."""
+    return {s.path: s.value for s in C.plan(cfg, k)}
+
+
 def run_daq(name: str, cfg: C.DaqConfig, options: str = "--rate 40 --seed 5", note: str = "", stop_after=None,
             timeout=60) -> tuple[int, str, dict, str]:
     """One run of the DAQ program with simulated boards, in a folder of its own: (exit code, log, status, folder)."""
@@ -538,6 +543,38 @@ class DaqRunTests(unittest.TestCase):
         self.assertEqual((m["out_of_sync"], set(m["missing"].values())), (0, {0}))
         counts = {b["name"]: b["events"] for b in st["boards"]}
         self.assertEqual(len(set(counts.values())), 1, counts)
+
+    def test_trigger_logic_b_and_front_panel(self):
+        """Two channel logics (ITLA, ITLB) combined, and the front panel of a board: in the plan, in the check, and
+        a run whose board refuses an optional test signal (it warns and goes on)."""
+        cfg = small(C.lab_setup(), n_ch=16, seconds=2)
+        cfg.trigger.combine = "A_OR_B"
+        cfg.boards[0].channels[15].itl = "B"                       # group B: channel 15 alone
+        v = plan_values(cfg, 0)
+        self.assertEqual((v["/par/AcqTriggerSource"], v["/par/TrgOutMode"]), ("ITLA_OR_ITLB", "ITLA_OR_ITLB"))
+        self.assertEqual((v["/ch/0..14/par/ITLConnect"], v["/ch/15/par/ITLConnect"], v["/par/ITLBMainLogic"]), ("ITLA", "ITLB", "OR"))
+        cfg.boards[2].io_trg_out = "TestPulse"                    # the end of the chain: TRG-OUT is free
+        cfg.boards[1].io_dac_out = "Square"
+        cfg.boards[0].io_tstamp_reset = "SIN"
+        v2 = plan_values(cfg, 2)
+        self.assertEqual((v2["/par/TrgOutMode"], v2["/par/TestPulsePeriod"]), ("TestPulse", str(cfg.trigger.test_pulse_period_ns)))
+        self.assertEqual(plan_values(cfg, 1)["/par/DACoutMode"], "Square")
+        self.assertEqual([p for p in C.check_config(cfg, check_paths=False) if p.level != "info"], [])
+        bad = cfg.copy()
+        bad.boards[1].io_trg_out = "Busy"                          # it carries the chain's trigger
+        bad.boards[1].io_start = "SINedge"                         # only the master starts
+        bad.boards[2].io_dac_out = "Nonsense"
+        found = {(p.level, p.where) for p in C.check_config(bad, check_paths=False)}
+        self.assertTrue({("warning", "boards[1].io_trg_out"), ("error", "boards[1].io_start"), ("error", "boards[2].io_dac_out")} <= found, found)
+        code, log, status, d = run_daq("logic_b", cfg, options="--rate 30 --seed 6 --fail param:vx2740a:dacoutmode")
+        self.assertEqual(code, 0, log)
+        self.assertIn("vx2740a: the board refused /par/DACoutMode = Square", log)
+        self.assertGreater(status["boards"][0]["events"], 10)
+        self.assertEqual(len({b["events"] for b in status["boards"]}), 1)
+        cfg.trigger.combine = "A_AND_B"                           # both groups at once: fewer triggers
+        code, log, status_and, d = run_daq("logic_ab", cfg, options="--rate 30 --seed 6")
+        self.assertEqual(code, 0, log)
+        self.assertLess(status_and["boards"][0]["events"], status["boards"][0]["events"])
 
     def test_periodic(self):
         cfg = small(C.default_config())

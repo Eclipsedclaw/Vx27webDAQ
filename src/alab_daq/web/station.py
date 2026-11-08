@@ -190,7 +190,10 @@ class Station:
                 "boards": info, "models": models.table(), "model_choices": models.CHOICES,
                 "decimations": list(models.DECIMATIONS), "setups": list(C.SETUPS), "sync_modes": list(C.SYNC_MODES),
                 "logics": list(C.LOGICS), "io_levels": list(C.IO_LEVELS), "max_boards": C.MAX_BOARDS,
-                "master_outs": list(C.MASTER_OUTS),
+                "master_outs": list(C.MASTER_OUTS), "combines": list(C.COMBINES),
+                "io_choices": {"trg_out": list(C.TRGOUT_CHOICES), "gpio": list(C.GPIO_CHOICES), "veto": list(C.VETO_CHOICES),
+                               "polarity": list(C.VETO_POLARITIES), "start": list(C.START_CHOICES),
+                               "tsreset": list(C.TSRESET_CHOICES), "dac": list(C.DAC_CHOICES)},
                 "uses_self_trigger": C.uses_self_trigger(cfg), "start_order": C.start_order(cfg) if active else [],
                 "software_targets": C.software_targets(cfg) if active else []}
 

@@ -323,6 +323,10 @@ class Run:
             self.log(f"  {br.name}: {s.path} = {s.value}" + (f"   ({s.why})" if s.why else ""))
             return True
         except BoardError as err:
+            if s.optional:                      # a test signal or an extra the board may not have: not fatal
+                refused.add(name)
+                self.log(f"{br.name}: the board refused {s.path} = {s.value} ({err}); the run goes on without it", "warning")
+                return True
             if not s.alt:
                 br.state, br.message, br.ended = "error", str(err), "error"
                 self.log(f"{br.name}: the board refused {s.path} = {s.value}: {err}", "error")
@@ -406,6 +410,10 @@ class Run:
             br.thread.start()
         starters = C.start_order(self.cfg)
         self.t_start, self.mono_start = time.time(), time.monotonic()
+        hw = self.boards[0].cfg.io_start
+        if hw:                                  # the master starts on a hardware signal: no software start
+            starters = [k for k in starters if k != 0]
+            self.log(f"the run starts when the master sees its start signal ({hw}); waiting for it")
         for k in starters:
             br = self.boards[k]
             try:
@@ -418,7 +426,8 @@ class Run:
         for br in self.boards:
             br.state = "running"
         who = "the master" if self.chained else "every board"
-        self.log(f"run started: SwStartAcquisition sent to {who}")
+        if not hw:
+            self.log(f"run started: SwStartAcquisition sent to {who}")
         self.set_phase("running")
         return True
 

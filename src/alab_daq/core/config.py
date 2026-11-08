@@ -48,6 +48,25 @@ IO_LEVELS = ("NIM", "TTL")
 PERIODIC_SOURCES = ("software", "test_pulse")
 SOFTWARE_TARGETS = ("each", "chain")
 URI_SCHEMES = ("dig2://",)
+COMBINES = ("A", "B", "A_AND_B", "A_OR_B")     # the board trigger from the two channel logics ITLA and ITLB
+COMBINE_SOURCE = {"A": "ITLA", "B": "ITLB", "A_AND_B": "ITLA_AND_ITLB", "A_OR_B": "ITLA_OR_ITLB"}
+WHY_OWN = {"ITLA": "own channels (ITLA)", "ITLB": "own channels (ITLB)", "ITLA_AND_ITLB": "own channels (ITLA AND ITLB)",
+           "ITLA_OR_ITLB": "own channels (ITLA OR ITLB)"}
+WHY_FORCE = {"ITLA": "own channels (ITLA), and Force trigger (SwTrg)", "ITLB": "own channels (ITLB), and Force trigger (SwTrg)",
+             "ITLA_AND_ITLB": "own channels (ITLA AND ITLB), and Force trigger (SwTrg)",
+             "ITLA_OR_ITLB": "own channels (ITLA OR ITLB), and Force trigger (SwTrg)"}
+# the front panel of a board (WaveDump2 manual, Tab. 20.2: TRGOUT, GPIO, VETO Source, Start Sources, Timestamp
+# Reset Sources, Set DAC OUT); "" leaves each to the trigger setup (or the board's default)
+TRGOUT_CHOICES = ("Disabled", "TrgIn", "SwTrg", "ITLA", "ITLB", "ITLA_AND_ITLB", "ITLA_OR_ITLB", "AcceptTrg", "Run",
+                  "Busy", "TestPulse", "RefClk", "TrgClk", "SIN", "GPIO", "SyncIn", "LVDS", "P0", "EncodedClkIn",
+                  "LBinClk", "UserTrgout", "Fixed0", "Fixed1")
+GPIO_CHOICES = ("Disabled", "TrgIn", "SwTrg", "ITLA", "ITLB", "ITLA_AND_ITLB", "ITLA_OR_ITLB", "Run", "Busy",
+                "TestPulse", "RefClk", "SIN", "LVDS", "P0", "EncodedClkIn", "UserGPIO", "Fixed0", "Fixed1")
+VETO_CHOICES = ("SIN", "GPIO", "LVDS", "P0", "EncodedClkIn")
+VETO_POLARITIES = ("ActiveHigh", "ActiveLow")
+START_CHOICES = ("SINlevel", "SINedge", "FirstTrigger", "LVDS", "P0")     # a hardware start of the master
+TSRESET_CHOICES = ("SIN", "GPIO")
+DAC_CHOICES = ("Static", "Ramp", "Sin5MHz", "Square", "IPE", "ChInput", "MemOccupancy", "ChSum", "OverThrSum")
 MAX_BOARDS = 32
 MAX_RECORD = 6_250_000          # WaveDump2's limit on the record length (samples)
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
@@ -64,7 +83,8 @@ class Channel:
     dc_offset: float = 50.0     # where the baseline sits, in % of the input range (0-100)
     threshold: int = 100        # ADC counts from the baseline, in the direction of the pulse
     positive: bool = False      # positive pulses (rising edge, above the baseline); else negative
-    self_trigger: bool = True   # takes part in the board's channel trigger (ITLA)
+    self_trigger: bool = True   # takes part in the board's channel trigger
+    itl: str = "A"              # which channel logic it joins: A (ITLA) or B (ITLB)
     gain: float = 0.0           # dB, 2745 only
 
 
@@ -82,6 +102,16 @@ class Board:
     clock_out_delay_ps: float | None = None     # None: CAEN's value
     channels: list = field(default_factory=list)    # Channel, one per channel of the model
     extra: list = field(default_factory=list)       # [path, value]: set last, as given (expert)
+    io_trg_out: str = ""        # TRG-OUT: "" = what the trigger setup needs (TRGOUT_CHOICES)
+    io_gpio_out: str = ""       # GPIO: "" = the setup's (the busy veto uses it)
+    io_veto: str = ""           # a veto of the acquisition from S-IN, GPIO, LVDS, ...; "" none
+    io_veto_width_ns: int = 0   # its width; 0 = the board's default
+    io_veto_polarity: str = ""  # ActiveHigh, ActiveLow; "" = the board's default
+    io_start: str = ""          # the master only: a hardware start (S-IN, first trigger, ...); "" = the DAQ starts it
+    io_tstamp_reset: str = ""   # the timestamp restarts on S-IN or GPIO; "" = at the run start
+    io_dac_out: str = ""        # DAC OUT (a test signal: a level, ramp, sine, square, pulses, a channel's copy)
+    io_dac_level: int = 0       # its level (Static)
+    io_dac_channel: int = 0     # the channel it copies (ChInput)
 
 
 @dataclass
@@ -98,6 +128,10 @@ class Trigger:
     io_level: str = "NIM"
     busy_veto: bool = False     # GPIO of all boards wired together: a busy board vetoes all (NIM only)
     master_out: str = "ITLA"    # setup "master": what the master sends on TRG-OUT
+    combine: str = "A"          # the board trigger: logic A, B, A AND B, A OR B (COMBINES)
+    logic_b: str = "OR"         # the second channel logic (ITLB), for the channels in group B
+    majority_b: int = 2
+    gate_b_ns: int = 16
 
 
 DEFAULT_DATA_DIR = "/NAS/ALAB_DAQ_DATA"                         # the lab's NAS: where runs write their data
@@ -148,6 +182,7 @@ class Setting:
     why: str = ""
     alt: list = field(default_factory=list)     # tried instead when the board does not know this parameter;
                                                 # once a name is refused, later settings of it are skipped
+    optional: bool = False                      # a refusal is a warning, not the end of the run
 
 
 # ---- defaults ----
@@ -416,15 +451,16 @@ def plan(cfg: DaqConfig, k: int, facts: models.Model | None = None) -> list[Sett
     last = k == n - 1
     pass_on = n > 1                         # TRG-OUT -> TRG-IN of the next board, with or without the clock chain
     own = triggers_on_channels(cfg, k)
-    force = Setting("/par/AcqTriggerSource", "ITLA|SwTrg", "own channels (ITLA), and Force trigger (SwTrg)",
-                    alt=[Setting("/par/AcqTriggerSource", "ITLA", "own channels (ITLA)")])
+    src = COMBINE_SOURCE.get(trg.combine, "ITLA")         # the board's channel trigger: ITLA, ITLB, or both
+    force = Setting("/par/AcqTriggerSource", f"{src}|SwTrg", WHY_FORCE[src],
+                    alt=[Setting("/par/AcqTriggerSource", src, WHY_OWN[src])])
     if trg.setup == "master":
         if k == 0:
             if trg.master_out == "AcceptTrg":       # a forced trigger then reaches every board
                 out.append(force)
             else:
-                put("/par/AcqTriggerSource", "ITLA", "own channels (ITLA)")
-            put("/par/TrgOutMode", trg.master_out if pass_on else "Disabled",
+                put("/par/AcqTriggerSource", src, WHY_OWN[src])
+            put("/par/TrgOutMode", (src if trg.master_out == "ITLA" else trg.master_out) if pass_on else "Disabled",
                 "TRG-OUT sends the master's trigger to the next board" if pass_on else "end of the trigger chain")
         else:
             put("/par/AcqTriggerSource", "TrgIn", "the master's trigger on TRG-IN")
@@ -439,7 +475,7 @@ def plan(cfg: DaqConfig, k: int, facts: models.Model | None = None) -> list[Sett
         put("/par/TrgOutMode", "Disabled", "")
     elif trg.setup == "logic_or":
         put("/par/AcqTriggerSource", "TrgIn", "the common trigger from the logic unit on TRG-IN")
-        put("/par/TrgOutMode", "ITLA", "TRG-OUT sends the channel triggers to the logic unit")
+        put("/par/TrgOutMode", src, "TRG-OUT sends the channel triggers to the logic unit")
     else:                                   # periodic
         if trg.periodic_source == "test_pulse":
             put("/par/AcqTriggerSource", "TestPulse", "internal test pulse")
@@ -454,17 +490,50 @@ def plan(cfg: DaqConfig, k: int, facts: models.Model | None = None) -> list[Sett
         else:
             put("/par/AcqTriggerSource", "SwTrg", "software trigger from the DAQ")
             put("/par/TrgOutMode", "Disabled", "")
-    if own:
+    uses_a, uses_b = trg.combine in ("A", "A_AND_B", "A_OR_B"), trg.combine in ("B", "A_AND_B", "A_OR_B")
+    if own and uses_a:
         put("/par/ITLAMainLogic", trg.logic, "how the channel triggers combine")
         if trg.logic == "Majority":
             put("/par/ITLAMajorityLev", trg.majority, "channels needed")
         put("/par/ITLAPairLogic", "None", "")
         put("/par/ITLAPolarity", "Direct", "")
         put("/par/ITLAGateWidth", trg.gate_ns, "channel trigger gate (ns)")
+    if own and uses_b:
+        put("/par/ITLBMainLogic", trg.logic_b, "how the channel triggers of group B combine")
+        if trg.logic_b == "Majority":
+            put("/par/ITLBMajorityLev", trg.majority_b, "channels of group B needed")
+        put("/par/ITLBPairLogic", "None", "")
+        put("/par/ITLBPolarity", "Direct", "")
+        put("/par/ITLBGateWidth", trg.gate_b_ns, "channel trigger gate of group B (ns)")
     if trg.busy_veto:
         put("/par/GPIOMode", "Busy", "GPIO out: this board is busy")
         put("/par/VetoSource", "GPIO", "GPIO in: any busy board vetoes",
             alt=[Setting("/par/BoardVetoSource", "GPIO", "GPIO in: any busy board vetoes (other name)")])
+    # the front panel, as set for this board (after the setup's: these win)
+    if b.io_trg_out:
+        put("/par/TrgOutMode", b.io_trg_out, "TRG-OUT as set for this board")
+    if b.io_gpio_out:
+        put("/par/GPIOMode", b.io_gpio_out, "GPIO as set for this board")
+    if b.io_veto:
+        put("/par/VetoSource", b.io_veto, "the acquisition veto as set for this board",
+            alt=[Setting("/par/BoardVetoSource", b.io_veto, "the acquisition veto (other name)")])
+        if b.io_veto_width_ns:
+            out.append(Setting("/par/BoardVetoWidth", _fmt(b.io_veto_width_ns), "veto width (ns)", optional=True))
+        if b.io_veto_polarity:
+            out.append(Setting("/par/BoardVetoPolarity", b.io_veto_polarity, "veto polarity", optional=True))
+    if b.io_start and k == 0:
+        put("/par/StartSource", b.io_start, "the run starts on a hardware signal (the DAQ does not start it)")
+    if b.io_tstamp_reset:
+        put("/par/TstampResetSource", b.io_tstamp_reset, "the timestamp restarts on this signal")
+    if "TestPulse" in (b.io_trg_out, b.io_gpio_out) and not (trg.setup == "periodic" and trg.periodic_source == "test_pulse"):
+        put("/par/TestPulsePeriod", trg.test_pulse_period_ns, "test pulse period (ns)")
+        put("/par/TestPulseWidth", trg.test_pulse_width_ns, "test pulse width (ns)")
+    if b.io_dac_out:
+        out.append(Setting("/par/DACoutMode", b.io_dac_out, "DAC OUT: a test signal", optional=True))
+        if b.io_dac_out == "Static":
+            out.append(Setting("/par/DACoutStaticLevel", _fmt(b.io_dac_level), "DAC OUT level", optional=True))
+        if b.io_dac_out == "ChInput":
+            out.append(Setting("/par/DACoutChSelect", _fmt(b.io_dac_channel), "DAC OUT copies this channel", optional=True))
     # channels, grouped where neighbours are the same
     ch = b.channels
     for a, z, v in _ranges([c.enabled for c in ch]):
@@ -480,12 +549,12 @@ def plan(cfg: DaqConfig, k: int, facts: models.Model | None = None) -> list[Sett
             put(_ch(a, z, "TriggerThr"), v, "threshold (counts from the baseline)")
         for a, z, v in _ranges(["Rise" if c.positive else "Fall" for c in ch]):
             put(_ch(a, z, "SelfTriggerEdge"), v, "positive pulses" if v == "Rise" else "negative pulses")
-        mask = sum(1 << c for c, x in enumerate(ch) if x.self_trigger and x.enabled)
-        connect = [("ITLA" if x.self_trigger and x.enabled else "Disabled") for x in ch]
+        mask = sum(1 << c for c, x in enumerate(ch) if x.self_trigger and x.enabled and x.itl != "B")
+        connect = [(("ITLB" if x.itl == "B" else "ITLA") if x.self_trigger and x.enabled else "Disabled") for x in ch]
         groups = _ranges(connect)
         alt = [Setting("/par/ITLAMask", f"0x{mask:x}", "channels in the board trigger (older firmware)")]
         for j, (a, z, v) in enumerate(groups):
-            put(_ch(a, z, "ITLConnect"), v, "in the board trigger" if v == "ITLA" else "not in the board trigger",
+            put(_ch(a, z, "ITLConnect"), v, {"ITLA": "in the board trigger", "ITLB": "in the board trigger, group B"}.get(v, "not in the board trigger"),
                 alt=alt if j == 0 else [])
     for path, value in b.extra:
         put(path, value, "expert setting of the configuration")
@@ -581,6 +650,14 @@ def check_config(cfg: DaqConfig, check_paths: bool = True, facts: dict | None = 
         err("trigger.master_out", f"must be one of {', '.join(MASTER_OUTS)}")
     if trg.logic not in LOGICS:
         err("trigger.logic", f"must be one of {', '.join(LOGICS)}")
+    if trg.combine not in COMBINES:
+        err("trigger.combine", f"must be one of {', '.join(COMBINES)}")
+    if trg.logic_b not in LOGICS:
+        err("trigger.logic_b", f"must be one of {', '.join(LOGICS)}")
+    if not 1 <= trg.majority_b <= 64:
+        err("trigger.majority_b", "must be from 1 to 64")
+    if not 8 <= trg.gate_b_ns <= 10 ** 6:
+        err("trigger.gate_b_ns", "must be from 8 ns to 1 ms")
     if trg.io_level not in IO_LEVELS:
         err("trigger.io_level", "must be NIM or TTL")
     if trg.busy_veto and trg.io_level != "NIM":
@@ -636,6 +713,40 @@ def check_config(cfg: DaqConfig, check_paths: bool = True, facts: dict | None = 
         own = triggers_on_channels(cfg, place.get(id(b)))
         if not b.enabled:
             continue
+        k = place.get(id(b))
+        for field_, choices in (("io_trg_out", TRGOUT_CHOICES), ("io_gpio_out", GPIO_CHOICES), ("io_veto", VETO_CHOICES),
+                                ("io_veto_polarity", VETO_POLARITIES), ("io_start", START_CHOICES),
+                                ("io_tstamp_reset", TSRESET_CHOICES), ("io_dac_out", DAC_CHOICES)):
+            v = getattr(b, field_)
+            if v and v not in choices:
+                err(f"boards[{i}].{field_}", f"must be empty or one of {', '.join(choices)}")
+        if b.io_start and k != 0:
+            err(f"boards[{i}].io_start", "only the first board (the master) starts the run; the others start with it")
+        chain_out = (trg.setup in ("master", "external") and k is not None and k < len(active) - 1) or trg.setup == "logic_or" \
+            or (trg.setup == "periodic" and trg.periodic_source == "software" and trg.software_target == "chain"
+                and k is not None and k < len(active) - 1)
+        if b.io_trg_out and chain_out:
+            warn(f"boards[{i}].io_trg_out", "this board's TRG-OUT carries the trigger of the setup to the next board (or "
+                                              "the logic unit): another signal there breaks the trigger chain")
+        if b.io_gpio_out and trg.busy_veto:
+            warn(f"boards[{i}].io_gpio_out", "the busy veto uses GPIO: another signal there breaks it")
+        if b.io_veto and trg.busy_veto:
+            warn(f"boards[{i}].io_veto", "the busy veto sets the veto to GPIO; this replaces it")
+        if not 0 <= b.io_veto_width_ns <= 10 ** 9:
+            err(f"boards[{i}].io_veto_width_ns", "must be from 0 (the board's default) to 1 s")
+        if b.io_dac_out == "ChInput" and not 0 <= b.io_dac_channel < len(b.channels):
+            err(f"boards[{i}].io_dac_channel", f"{w} has channels 0 to {len(b.channels) - 1}")
+        if not 0 <= b.io_dac_level <= m.adc_max:
+            err(f"boards[{i}].io_dac_level", f"must be from 0 to {m.adc_max}")
+        if own and trg.combine in ("A", "B"):
+            other = "B" if trg.combine == "A" else "A"
+            if any(c.enabled and c.self_trigger and c.itl == other for c in b.channels):
+                warn(f"boards[{i}].channels", f"some channels are in group {other}, but the board trigger uses only "
+                                                f"group {trg.combine}: they do not trigger")
+        if own and trg.combine in ("A_AND_B", "A_OR_B"):
+            for g in ("A", "B"):
+                if not any(c.enabled and c.self_trigger and c.itl == g for c in b.channels):
+                    warn(f"boards[{i}].channels", f"no channel is in group {g}: logic {g} never fires")
         if not 4 <= b.record_length <= MAX_RECORD:
             err(f"boards[{i}].record_length", f"must be from 4 to {MAX_RECORD:,} samples")
         elif b.record_length % 4:
@@ -658,6 +769,8 @@ def check_config(cfg: DaqConfig, check_paths: bool = True, facts: dict | None = 
             cw = f"boards[{i}].channels[{c}]"
             if not 0 <= ch.dc_offset <= 100:
                 err(f"{cw}.dc_offset", "must be from 0 to 100 %")
+            if ch.itl not in ("A", "B"):
+                err(f"{cw}.itl", "must be A or B")
             if ch.threshold < 0:
                 err(f"{cw}.threshold", "counts from the baseline: use 0 or more; the pulse direction is set apart")
             elif ch.threshold >= m.adc_max // 2 and own and ch.self_trigger and ch.enabled:

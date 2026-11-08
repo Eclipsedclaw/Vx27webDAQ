@@ -154,7 +154,14 @@ def board_params(m: models.Model) -> dict:
         "itlapairlogic": (_choice(("None", "AND", "OR")), "None"),
         "itlapolarity": (_choice(("Direct", "Inverted")), "Direct"), "itlagatewidth": (_int(8, 10 ** 6), "16"),
         "itlamask": (_mask, "0x0"), "tstampresetsource": (_combo(("Start", "SIN", "GPIO", "EncodedClkIn")), "Start"),
-        "dacoutmode": (_choice(("Fixed", "Square", "Ramp", "ChInput", "Static", "IPE", "MemOccupancy")), "Fixed"),
+        "dacoutmode": (_choice(("Static", "Ramp", "Sin5MHz", "Square", "IPE", "ChInput", "MemOccupancy", "ChSum",
+                                "OverThrSum")), "Static"),
+        "dacoutstaticlevel": (_int(0, adc_max), "0"), "dacoutchselect": (_int(0, m.channels - 1), "0"),
+        "itlbmainlogic": (_choice(("OR", "AND", "Majority")), "OR"), "itlbmajoritylev": (_int(1, 64), "2"),
+        "itlbpairlogic": (_choice(("None", "AND", "OR")), "None"),
+        "itlbpolarity": (_choice(("Direct", "Inverted")), "Direct"), "itlbgatewidth": (_int(8, 10 ** 6), "16"),
+        "itlbmask": (_mask, "0x0"), "boardvetosource": (_combo(VETO_SOURCES), "Disabled"),
+        "boardvetowidth": (_int(0, 10 ** 9), "0"), "boardvetopolarity": (_choice(("ActiveHigh", "ActiveLow")), "ActiveHigh"),
         "maxrawdatasize": (None, str(MAX_RAW)), "fwtype": (None, "Scope"), "fpga_fwver": (None, "2024100301"),
         "cupver": (None, "2024100301"), "numch": (None, str(m.channels)), "adc_nbit": (None, str(m.adc_bits)),
         "adc_samplrate": (None, f"{m.msps:g}"), "tempsensairin": (None, "31.5"), "tempsensairout": (None, "36.0"),
@@ -296,8 +303,8 @@ class Crate:
             return self.trgin(b, t0, t1, seen)
         if mode == "SwTrg":
             return [(t, None) for t in b.sw_between(t0, t1)]
-        if mode == "ITLA":
-            return b.itla(t0, t1)
+        if mode in ("ITLA", "ITLB", "ITLA_AND_ITLB", "ITLA_OR_ITLB"):
+            return b.itl_sources(t0, t1, mode)
         if mode == "TestPulse":
             return [(t, None) for t in b.test_pulses(t0, t1)]
         if mode == "AcceptTrg":                 # the triggers the board took
@@ -516,14 +523,29 @@ class SimBoard:
         return np.where(on, self.crate.opt.amplitude * rng.uniform(0.5, 1.5, self.m.channels), 0.0)
 
     def itla(self, t0, t1):
+        return self.itl(t0, t1, "ITLA")
+
+    def itl_sources(self, t0, t1, name: str):
+        """The triggers of a channel-trigger source: ITLA, ITLB, ITLA_AND_ITLB, ITLA_OR_ITLB."""
+        if name in ("ITLA", "ITLB"):
+            return self.itl(t0, t1, name)
+        a, b = self.itl(t0, t1, "ITLA"), self.itl(t0, t1, "ITLB")
+        if name == "ITLA_AND_ITLB":
+            tb = {t for t, _ in b}
+            return [x for x in a if x[0] in tb]
+        merged = {x[0]: x for x in a + b}
+        return [merged[t] for t in sorted(merged)]
+
+    def itl(self, t0, t1, block: str):
         connected = [c for c in range(self.m.channels)
-                     if self.ch[c]["itlconnect"] == "ITLA" and self.ch[c]["chenable"] == "True"]
-        mask = int(self.p("itlamask"), 16)
+                     if self.ch[c]["itlconnect"] == block and self.ch[c]["chenable"] == "True"]
+        pre = block.lower()
+        mask = int(self.p(f"{pre}mask"), 16)
         if not connected and mask:
             connected = [c for c in range(self.m.channels) if mask >> c & 1 and self.ch[c]["chenable"] == "True"]
         if not connected:
             return []
-        logic, lev = self.p("itlamainlogic"), int(self.p("itlamajoritylev"))
+        logic, lev = self.p(f"{pre}mainlogic"), int(self.p(f"{pre}majoritylev"))
         out = []
         for t, seed in self.crate.hits(t0, t1):
             amp = self.hit_amplitudes(seed)
@@ -540,8 +562,9 @@ class SimBoard:
             out += [(t, None) for t in self.sw_between(t0, t1)]
         if "TestPulse" in sources:
             out += [(t, None) for t in self.test_pulses(t0, t1)]
-        if "ITLA" in sources:
-            out += self.itla(t0, t1)
+        for name in ("ITLA", "ITLB", "ITLA_AND_ITLB", "ITLA_OR_ITLB"):
+            if name in sources:
+                out += self.itl_sources(t0, t1, name)
         if "TrgIn" in sources:
             out += self.crate.trgin(self, t0, t1, seen)
         out.sort(key=lambda x: x[0])

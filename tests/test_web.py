@@ -562,6 +562,19 @@ class PageTests(WebTestCase):
                             cfg.run.sync = sync
                             for k in range(len(cfg.boards)):
                                 used |= {s.why for s in C.plan(cfg, k) if s.why}
+        for combine in C.COMBINES:                                      # the two channel logics
+            for setup in ("master", "self", "logic_or"):
+                for out in C.MASTER_OUTS:
+                    lab = C.lab_setup()
+                    lab.trigger.setup, lab.trigger.combine, lab.trigger.master_out, lab.trigger.logic_b = setup, combine, out, "Majority"
+                    lab.boards[0].channels[3].itl = "B"
+                    used |= {s.why for k in range(3) for s in C.plan(lab, k) if s.why}
+        io = C.lab_setup()                                              # the front panel
+        io.boards[0].io_start, io.boards[0].io_veto, io.boards[0].io_veto_width_ns, io.boards[0].io_veto_polarity = "SINedge", "SIN", 100, "ActiveLow"
+        io.boards[2].io_trg_out, io.boards[2].io_gpio_out, io.boards[2].io_tstamp_reset = "TestPulse", "Run", "GPIO"
+        for dac in ("Static", "ChInput"):
+            io.boards[1].io_dac_out = dac
+            used |= {s.why for k in range(3) for s in C.plan(io, k) if s.why}
         three = C.default_config()
         three.boards.append(C.Board("b2", "dig2://x", "V2740", channels=C.channels_for("V2740")))
         used |= {s.why for s in C.plan(three, 1) if s.why}

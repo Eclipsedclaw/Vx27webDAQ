@@ -5,6 +5,10 @@ What changed in each version of ALAB DAQ. Write the notes of the next version un
 
 ## Unreleased
 
+## v0.0.8 (2026-11-08)
+
+- Front panel, test signals and the second channel logic. Each board's TRG-OUT, GPIO, acquisition veto (source, width, polarity), hardware start of the master (S-IN level or edge, first trigger, LVDS, P0), timestamp reset and DAC OUT (level, ramp, sine, square, pulse emulator, channel copy) can be set (WaveDump2's Board settings), with checks where they would break the trigger chain; settings whose names a board may not have are optional (a refusal is a warning). The board trigger can use ITLB too: logic A, B, A AND B or A OR B, each channel in group A or B. A hardware start makes the DAQ wait for the master's start signal instead of sending SwStartAcquisition.
+
 ## v0.0.7 (2026-11-08)
 
 - Scope tools (WaveDump2's plot panel) on the waveforms: Plot Waveforms, FFT (mean power of the newest N events, mean taken off, Hann window, dBFS) or Histogram (sample values over the events so far); the mean of the newest 4/16/64 waveforms; the y axis in ADC or mV from the baseline; the values at both edges of a measured range and their difference. The server sends every sample when asked (`full=1`, at most 65536 per channel) and each board's mV per count.
