@@ -167,6 +167,58 @@ class BoardCheck:
             self.publish()
             st.config_changed()             # the configuration check compares with what the boards said
 
+    async def apply(self, user: str) -> dict:
+        """Send to boards: the configuration being edited, to every board switched on, now (python -m alab_daq.daq
+        apply): reset, then every parameter, as at the start of a run, without taking data. Not during a run."""
+        st = self.station
+        if st.runs.active is not None:
+            raise CheckError("not during a run: the run sent the configuration when it started")
+        if st.sequence.running():
+            raise CheckError("not during a run sequence: each of its runs sends its configuration when it starts")
+        if self.running or self.param_busy:
+            raise CheckError("the boards are busy with a check; try again in a moment")
+        bad = [p for p in C.check_config(st.cfg, check_paths=False, facts=self.facts()) if p.level == "error"]
+        if bad:
+            raise C.ConfigError("the configuration has errors: " + "; ".join(f"{p.where}: {p.message}" for p in bad))
+        names = [b.name for _, b in st.cfg.active()]
+        cfg_path = str(st.state_dir / "apply_config.json")
+        C.save_config(st.cfg, cfg_path)
+        cmd = [sys.executable, "-m", "alab_daq.daq", "apply", cfg_path]
+        if st.settings.use_simulator:
+            cmd += ["--simulate", st.settings.sim_options()]
+        env = dict(os.environ, PYTHONPATH=str(PROJECT / "src"), PYTHONUNBUFFERED="1", OMP_NUM_THREADS="1",
+                   **st.settings.lib_env())
+        self.param_busy = True
+        try:
+            proc = await asyncio.create_subprocess_exec(*cmd, stdin=asyncio.subprocess.DEVNULL, env=env,
+                                                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            try:
+                out, _ = await asyncio.wait_for(proc.communicate(), CHECK_TIMEOUT_S * max(1, len(names)) + 10)
+            except asyncio.TimeoutError:
+                proc.kill()
+                raise CheckError("the boards did not answer in time") from None
+        finally:
+            self.param_busy = False
+        results, extra = [], []
+        for line in out.decode("utf-8", "replace").splitlines():
+            try:
+                r = json.loads(line)
+            except ValueError:
+                if line.strip():
+                    extra.append(line.strip())       # what the CAEN library printed
+                continue
+            if "name" in r:
+                results.append(r)
+            elif r.get("error"):
+                raise CheckError(r["error"])
+        for name in names:
+            if not any(r["name"] == name for r in results):
+                results.append({"name": name, "ok": False, "sent": 0, "warnings": [],
+                                "error": "no answer" + (f" ({' '.join(extra[-2:])})" if extra else "")})
+        good = sum(1 for r in results if r["ok"])
+        st.activity(user, "sent the configuration to the boards", f"{good} of {len(results)} took it")
+        return {"results": results, "simulator": st.settings.use_simulator}
+
     async def param(self, user: str, board: str, action: str, path: str, value: str = "") -> dict:
         """The manual controller (WaveDump2's): get or set one parameter of an idle board, or send it a command,
         through python -m alab_daq.daq param. The next run resets the board and sets it from the configuration."""

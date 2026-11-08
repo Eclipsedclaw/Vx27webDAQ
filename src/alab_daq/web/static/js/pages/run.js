@@ -28,10 +28,62 @@ export function configSummary(app) {
   const c = app.state.config, cfg = c.config, sim = app.state.settings.values.use_simulator;
   const n = cfg.boards.filter((b) => b.enabled).length;
   const sync = n < 2 ? t("one board") : cfg.run.sync === "chain" ? t("clock chain") : t("independent boards");
-  const data = sim ? t("in the run folder (simulator)") : cfg.run.write_raw ? cfg.run.data_dir : t("not written");
+  const data = sim ? t("{folder} (simulator)", { folder: `${cfg.run.data_dir.replace(/\/+$/, "")}/simulated` })
+                   : cfg.run.write_raw ? cfg.run.data_dir : t("not written");
   return t("{n} boards · {sync} · trigger: {setup} · run time {d} · data: {data}",
            { n, sync, setup: t(SETUP_NAMES[cfg.trigger.setup] || cfg.trigger.setup),
              d: cfg.run.duration_s ? fmtDuration(cfg.run.duration_s) : t("until Stop"), data });
+}
+
+// the simulator is on: say so plainly before a run starts (or the configuration goes to the boards), and how to use
+// the real cards instead
+export function simulatorWarning(forRun = true) {
+  return h("div.notice.warn.sim-warn", icon("alert"), h("div.stack", { style: "gap:4px" },
+    h("b", forRun ? t("The simulator is ON: this run uses simulated boards, not your CAEN cards.")
+                  : t("The simulator is ON: the configuration goes to simulated boards, not to your CAEN cards.")),
+    forRun ? h("span", t("Nothing is read from the real boards: the data are made up. They go into the folder “simulated” inside the data folder, apart from the real runs.")) : null,
+    h("span", t("To use the real cards: Settings (at the top of the page) → simulator → switch off “use simulated boards instead of the real ones (no hardware)” → Save settings; then Check boards."))));
+}
+
+// Send to boards (Run and Configuration pages): the configuration being edited goes to every board switched on, now:
+// each is reset and given every parameter, as at the start of a run, without taking data. Start run does the same
+// first anyway; this shows before a run whether every board takes it. before(): the page's own edits are sent first.
+export async function sendToBoards(app, before) {
+  if (app.state.run && app.state.run.active) {
+    toast(t("Not during a run: the run sent the configuration to the boards when it started"), "error");
+    return;
+  }
+  const names = app.state.config.config.boards.filter((b) => b.enabled).map((b) => b.name);
+  if (!names.length) { toast(t("No board is switched on in the configuration"), "error"); return; }
+  const sim = app.state.settings.values.use_simulator;
+  const ok = await confirmDialog(t("Send the configuration to the boards?"), [
+    sim ? simulatorWarning(false) : null,
+    t("Each board switched on ({names}) is reset and given every parameter of the configuration on the Configuration page, as at the start of a run. No data are taken.", { names: names.join(", ") }),
+    t("Start run does this too, first thing: a run always uses the configuration as it is on the page, saved to a file or not. Send it now to see, before the run, that every board takes it."),
+  ], t("Send to boards"));
+  if (!ok) return;
+  let r;
+  try {
+    if (before) await before();
+    toast(t("Sending the configuration to {n} boards…", { n: names.length }));
+    r = await post("/api/boards/apply");
+  } catch (err) { fail(err); return; }
+  const good = r.results.filter((b) => b.ok).length;
+  const rows = r.results.map((b) => {
+    const warn = b.ok && b.warnings && b.warnings.length;
+    return h(`li.${b.ok ? (warn ? "warning" : "ok") : "error"}`, icon(b.ok && !warn ? "check" : "alert"),
+      h("div.stack", { style: "gap:2px;min-width:0" },
+        h("div", h("b", b.name), b.uri ? h("span.mono.small", ` · ${b.uri}`) : null),
+        b.ok ? h("span", t("took it: {n} parameters; record {len} samples, {pre} before the trigger",
+                          { n: b.sent, len: b.record_length ?? "?", pre: b.pre_trigger ?? "?" }))
+             : h("span.break", b.error || t("no answer")),
+        (b.warnings || []).map((w) => h("span.small.break", w))));
+  });
+  const all = good === r.results.length;
+  await dialog({ title: all ? t("Every board took the configuration") : t("{good} of {n} boards took the configuration", { good, n: r.results.length }),
+                 body: h("div.stack", r.simulator ? h("div.notice.warn", icon("alert"), t("Simulated boards (the simulator is ON), not the CAEN cards.")) : null,
+                         h("ul.problems", rows),
+                         all ? null : h("p.hint", { style: "margin:0" }, t("A run would stop at the same place: correct the configuration (or the board), then send it again."))) });
 }
 
 export function viewerNotice(app, text) {
@@ -52,6 +104,7 @@ export function runPage(root, app) {
   const checkBtn = h("button.btn", { type: "button", onclick: checkBoards,
                                      title: t("Connect to every board of the configuration and read what it is (model, serial, firmware, temperatures)") },
                      icon("link"), t("Check boards"));
+  const sendBtn = h("button.btn", { type: "button", onclick: () => sendToBoards(app) }, icon("send"), t("Send to boards"));
   const startBtn = h("button.btn.btn-primary", { type: "button", onclick: startRun }, icon("run"), t("Start run"));
   const stopBtn = h("button.btn", { type: "button", onclick: stopRun, title: t("End the run cleanly: the master stops the chain, every board sends its last data and its stop record") },
                     icon("stop"), t("Stop"));
@@ -77,7 +130,7 @@ export function runPage(root, app) {
                      app.can("control") ? h("a.small", { href: "#config", title: t("The note is on the Configuration page") }, t("edit")) : null);
   page.appendChild(h("div.card.run-bar",
     h("div.card-body.stack",
-      h("div.row", checkBtn, h("span.sep"), startBtn, seqBtn, stopBtn, killBtn, forceBtn, h("span.sep"), phase, who, h("span.spacer"), timeText, convert),
+      h("div.row", checkBtn, sendBtn, h("span.sep"), startBtn, seqBtn, stopBtn, killBtn, forceBtn, h("span.sep"), phase, who, h("span.spacer"), timeText, convert),
       bar, noteLine, seqLine, result)));
 
   // ---- waveforms | progress and output ----
@@ -203,6 +256,10 @@ export function runPage(root, app) {
     const active = app.state.run && app.state.run.active;
     checkBtn.disabled = !app.can("control") || Boolean(C && C.running) || Boolean(active);
     checkBtn.title = active ? t("Not during a run: the table shows the boards") : t("Connect to every board of the configuration and read what it is (model, serial, firmware, temperatures)");
+    const seqGoing = Boolean(app.state.sequence && app.state.sequence.state === "running");
+    sendBtn.disabled = !app.can("control") || Boolean(C && C.running) || Boolean(active) || seqGoing;
+    sendBtn.title = active || seqGoing ? t("Not during a run: the run sent the configuration to the boards when it started")
+                  : t("Reset every board switched on and send it the configuration now, as at the start of a run, without taking data");
   }
 
   function showRun() {
@@ -373,14 +430,6 @@ export function runPage(root, app) {
     try { await post("/api/boards/check"); } catch (err) { fail(err); }
   }
 
-  // the simulator is on: say so plainly before a run starts, and how to use the real cards instead
-  function simulatorWarning() {
-    return h("div.notice.warn.sim-warn", icon("alert"), h("div.stack", { style: "gap:4px" },
-      h("b", t("The simulator is ON: this run uses simulated boards, not your CAEN cards.")),
-      h("span", t("Nothing is read from the real boards: the data are made up, and they stay in the run folder (not in the data folder).")),
-      h("span", t("To use the real cards: Settings (at the top of the page) → simulator → switch off “use simulated boards instead of the real ones (no hardware)” → Save settings; then Check boards."))));
-  }
-
   async function startRun() {
     let p;
     try { p = await get("/api/run/preview"); } catch (err) { fail(err); return; }
@@ -397,7 +446,7 @@ export function runPage(root, app) {
       h("dt", t("Run time")), h("dd", p.duration ? `${p.duration} s (${fmtDuration(p.duration)})` : t("until Stop")),
       p.max_events ? [h("dt", t("Events")), h("dd", t("stop at {n} events of the first board", { n: fmtInt(p.max_events) }))] : null,
       h("dt", t("Run record")), h("dd.mono.small", p.runs_folder),
-      h("dt", t("Data")), h("dd.mono.small", p.simulator ? t("in the run folder (simulator)") : p.data_folder ? `${p.data_folder}/${p.run_name}_BOARD.raw` : t("not written")),
+      h("dt", t("Data")), h("dd.mono.small", p.data_folder ? `${p.data_folder}/${p.run_name}_BOARD.raw` : t("not written")),
       p.free_bytes !== null ? [h("dt", t("Free there")), h("dd", fmtBytes(p.free_bytes))] : null);
     const noteBox = h("textarea.input.note-input", { rows: "3", maxlength: "4000", "aria-label": t("Note for this run") });
     noteBox.value = app.state.config.note || "";
@@ -543,7 +592,7 @@ export function runPage(root, app) {
       } else if (type === "log") addLines(msg.lines, false);
       else if (type === "log_reset") addLines([], true);
       else if (type === "boards") showCheck();
-      else if (type === "sequence") showRun();
+      else if (type === "sequence") { showRun(); showCheck(); }
       if (tab === "setup" && (type === "run" || type === "config" || type === "boards")) setup.render();
       else if (type === "root" || type === "root_done") showRoot();
       else if (type === "config" || type === "settings") {

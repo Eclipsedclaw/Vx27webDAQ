@@ -369,6 +369,11 @@ async def run_control(request):
 
 
 @api("operator")
+async def boards_apply(request):
+    return await request.app["station"].boards.apply(request["user"])
+
+
+@api("operator")
 async def boards_param(request):
     st: Station = request.app["station"]
     data = await body(request)
@@ -647,6 +652,7 @@ def create_app(station: Station | None = None) -> web.Application:
     r.add_post("/api/sequence/start", sequence_start)
     r.add_post("/api/sequence/stop", sequence_stop)
     r.add_post("/api/boards/param", boards_param)
+    r.add_post("/api/boards/apply", boards_apply)
     r.add_post("/api/boards/check", boards_check)
     r.add_get("/api/boards/tree", boards_tree)
     r.add_get("/api/config", get_config)

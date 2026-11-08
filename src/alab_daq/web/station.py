@@ -165,7 +165,7 @@ class Station:
     def config_payload(self) -> dict:
         cfg = self.cfg
         facts = self.boards.facts() if hasattr(self, "boards") else {}
-        problems = C.check_config(cfg, check_paths=not self.settings.use_simulator, facts=facts)
+        problems = C.check_config(cfg, check_paths=True, facts=facts)     # simulated runs write into the data folder too
         active = cfg.active()
         n = len(active)
         chained = cfg.run.sync == "chain" and n > 1

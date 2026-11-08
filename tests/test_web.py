@@ -175,6 +175,7 @@ class RoleTests(WebTestCase):
         await self.login("view1")
         self.assertEqual((await self.client.post("/api/run/start", json={}, headers=CHANGE)).status, 403)
         self.assertEqual((await self.client.post("/api/boards/check", headers=CHANGE)).status, 403)
+        self.assertEqual((await self.client.post("/api/boards/apply", headers=CHANGE)).status, 403)
         self.assertEqual((await self.client.get("/api/users")).status, 403)
         await self.login("oper1")
         self.assertEqual((await self.client.get("/api/run/preview")).status, 200)
@@ -198,6 +199,8 @@ class RunTests(WebTestCase):
         await self.login("oper1")
         p = await (await self.client.get("/api/run/preview")).json()
         self.assertEqual((p["errors"], p["boards"], p["simulator"]), ([], 2, True))
+        sim_dir = os.path.join(self.root, "data", "simulated")    # simulated data: DATA_FOLDER/simulated/
+        self.assertEqual((p["data_folder"], p["run_name"]), (sim_dir, "run00001"))
         run_dir = await self.start_run(NOTE)
         self.assertTrue(os.path.isfile(os.path.join(run_dir, "config.json")))
         r = await self.client.post("/api/run/start", json={}, headers=CHANGE)
@@ -269,7 +272,7 @@ class RunTests(WebTestCase):
         files = summary["data_files"]
         self.assertEqual(len(files), 2)
         for path in files:
-            self.assertTrue(path.startswith(os.path.join(run_dir, "raw")))     # simulated data stay in the run folder
+            self.assertEqual(os.path.dirname(path), sim_dir)              # on the NAS, apart from the real runs
             with open(os.path.splitext(path)[0] + ".json", encoding="utf-8") as f:
                 side = json.load(f)
             self.assertEqual(side["note"], NOTE)
@@ -374,7 +377,8 @@ class SequenceTests(WebTestCase):
             self.assertIn(f"threshold = {thr} on b1", note)
             self.assertEqual(cfg.run.duration_s, 1)
         self.assertEqual(self.station.cfg.boards[1].channels[0].threshold, 100)    # the draft: unchanged
-        self.assertEqual(len({x["run_dir"] for x in s["runs"]}), 2)        # (simulated runs each have their own data folder)
+        self.assertEqual(len({x["run_dir"] for x in s["runs"]}), 2)
+        self.assertEqual([x["run_name"] for x in s["runs"]], ["run00001", "run00002"])    # numbered in DATA/simulated
         # stop: the run going and the sequence
         r = await self.client.post("/api/sequence/start", json={"kind": "repeat", "count": 3, "duration_s": 30}, headers=CHANGE)
         self.assertEqual(r.status, 200)
@@ -478,6 +482,42 @@ class BoardCheckTests(WebTestCase):
         # not during a run
         await self.start_run()
         r = await self.client.post("/api/boards/check", headers=CHANGE)
+        self.assertEqual(r.status, 409)
+        await self.wait(self.ended, 30, "the end of the run")
+
+    async def test_send_to_boards(self):
+        """Send to boards: every board switched on is reset and gets the configuration being edited, now; a board
+        that refuses a parameter says which; not during a run, and a run does not start while it goes."""
+        await self.login("oper1")
+        r = await self.client.post("/api/boards/apply", headers=CHANGE)
+        self.assertEqual(r.status, 200, await r.text())
+        res = await r.json()
+        self.assertTrue(res["simulator"])
+        got = {b["name"]: b for b in res["results"]}
+        self.assertEqual(sorted(got), ["b0", "b1"])
+        self.assertTrue(all(b["ok"] and b["sent"] > 5 and not b["warnings"] for b in got.values()), got)
+        self.assertEqual([(got[n]["record_length"], got[n]["pre_trigger"]) for n in ("b0", "b1")], [(64, 16), (256, 64)])
+        self.assertEqual(self.station.activity_log[-1]["action"], "sent the configuration to the boards")
+        # what the page has now (not the file): b1 off -> only b0; a refused parameter fails that board
+        self.station.cfg.board("b1").enabled = False
+        self.station.settings.simulator_options = self.options + " --fail param:b0:ChEnable"
+        res = await (await self.client.post("/api/boards/apply", headers=CHANGE)).json()
+        self.assertEqual([(b["name"], b["ok"]) for b in res["results"]], [("b0", False)])
+        self.assertRegex(res["results"][0]["error"], r"refused /ch/[0-9.]+/par/ChEnable")
+        self.station.cfg.board("b0").enabled = False
+        r = await self.client.post("/api/boards/apply", headers=CHANGE)
+        self.assertEqual(r.status, 400)                                  # the configuration has errors
+        self.assertIn("every board is switched off", await r.text())
+        self.station.cfg.board("b0").enabled = self.station.cfg.board("b1").enabled = True
+        self.station.settings.simulator_options = self.options
+        # a run does not start while the boards are busy; Send to boards is refused during a run
+        self.station.boards.param_busy = True
+        r = await self.client.post("/api/run/start", json={}, headers=CHANGE)
+        self.assertEqual(r.status, 409)
+        self.assertIn("busy", await r.text())
+        self.station.boards.param_busy = False
+        await self.start_run()
+        r = await self.client.post("/api/boards/apply", headers=CHANGE)
         self.assertEqual(r.status, 409)
         await self.wait(self.ended, 30, "the end of the run")
 

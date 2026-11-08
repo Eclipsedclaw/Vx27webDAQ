@@ -75,6 +75,7 @@ const PATHS = {
   zoom: "M11 18a7 7 0 1 0 0-14a7 7 0 0 0 0 14zM21 21l-5-5M8 11h6",
   list: "M9 6h12M9 12h12M9 18h12M4 6h.01M4 12h.01M4 18h.01",
   board: "M7 2h10v20H7zM10 6h4M10 10h4M10 14h4M10 18h2",
+  send: "M22 2L11 13M22 2l-7 20-4-9-9-4z",
 };
 
 export function icon(name, cls) {

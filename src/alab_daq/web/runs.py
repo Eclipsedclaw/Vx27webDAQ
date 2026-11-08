@@ -20,6 +20,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -37,6 +38,7 @@ KILL_AFTER_S = 15           # Kill is offered when the DAQ has not ended this lo
 LOG_LINES = 20000           # the newest lines of the DAQ's output that a page gets when it opens
 UNKNOWN_EXIT = -1000        # the wrapper ended without writing the DAQ's exit code
 RUN_FILE = re.compile(r"^run(\d{5,})_")
+SIM_FOLDER = "simulated"    # simulated runs write into DATA_FOLDER/simulated/: on the NAS, apart from the real runs
 DAQ_MARKER = "alab_daq.daq run"
 
 
@@ -127,10 +129,12 @@ class RunManager:
         """What the Start question shows, and why a start would be refused."""
         st = self.station
         cfg, s = st.cfg, st.settings
-        problems = C.check_config(cfg, check_paths=not s.use_simulator, facts=st.boards.facts())
+        problems = C.check_config(cfg, check_paths=True, facts=st.boards.facts())
         r = cfg.run
         data_dir = os.path.expanduser(r.data_dir)
-        free = disk_free(data_dir) if r.write_raw and not s.use_simulator else None
+        free = disk_free(data_dir) if (r.write_raw or s.use_simulator) and os.path.isdir(data_dir) else None
+        if s.use_simulator:
+            data_dir = os.path.join(data_dir, SIM_FOLDER)
         need = None
         t = cfg.trigger
         if t.setup == "periodic" and r.duration_s:
@@ -142,8 +146,8 @@ class RunManager:
                 "busy": self.active is not None, "simulator": s.use_simulator, "duration": r.duration_s,
                 "max_events": r.max_events, "boards": len(cfg.active()), "sync": r.sync, "setup": t.setup,
                 "runs_folder": s.runs_folder(),
-                "data_folder": None if s.use_simulator or not r.write_raw else data_dir,
-                "run_name": next_run_name([data_dir]) if not s.use_simulator else None,
+                "data_folder": data_dir if r.write_raw or s.use_simulator else None,
+                "run_name": next_run_name([data_dir]),
                 "free_bytes": free, "need_bytes": need, "converting": st.converter.left()}
 
     def start(self, user: str, note: str | None = None, cfg: C.DaqConfig | None = None, run_note: str | None = None,
@@ -155,11 +159,13 @@ class RunManager:
         if p["busy"]:
             raise RunError("a run is going already")
         if cfg is not None:
-            p["errors"] = [asdict(x) for x in C.check_config(cfg, check_paths=not s.use_simulator, facts=st.boards.facts())
+            p["errors"] = [asdict(x) for x in C.check_config(cfg, check_paths=True, facts=st.boards.facts())
                            if x.level == "error"]
         if p["errors"]:
             raise RunError("the configuration has errors: " + "; ".join(f"{e['where']}: {e['message']}"
                                                                          for e in p["errors"]))
+        if st.boards.param_busy:
+            raise RunError("the boards are busy (Send to boards or the manual controller): try again in a moment")
         if p["others"]:
             raise RunError("a DAQ program is running already (pid " + ", ".join(str(o["pid"]) for o in p["others"]) + ")")
         if note is not None:
@@ -171,9 +177,17 @@ class RunManager:
         while os.path.exists(run_dir):
             run_dir, n = f"{base}_{n}", n + 1
         os.makedirs(run_dir)
-        if s.use_simulator:         # simulated data stay in the run folder, never in a real data folder
-            cfg.run.data_dir, cfg.run.write_raw = os.path.join(run_dir, "raw"), True
-            os.makedirs(cfg.run.data_dir)
+        if s.use_simulator:         # simulated data: DATA_FOLDER/simulated/, never among the real runs' files
+            root = os.path.expanduser(cfg.run.data_dir)
+            sim_dir = os.path.join(root, SIM_FOLDER)
+            try:
+                if not os.path.isdir(root):         # e.g. the NAS not mounted: never make its folder on the local disk
+                    raise OSError(f"the data folder {root} does not exist")
+                os.makedirs(sim_dir, exist_ok=True)
+            except OSError as err:
+                shutil.rmtree(run_dir, ignore_errors=True)
+                raise RunError(f"cannot make the folder of simulated data {sim_dir}: {err}") from None
+            cfg.run.data_dir, cfg.run.write_raw = sim_dir, True
         run_name = next_run_name([os.path.expanduser(cfg.run.data_dir)])
         C.save_config(cfg, os.path.join(run_dir, "config.json"), note=this_note, run_name=run_name,
                       run_folder=run_dir, started_by=user, started=time.strftime("%Y-%m-%d %H:%M:%S"),

@@ -106,7 +106,7 @@ class SequenceManager:
         else:
             raise ValueError("the kind of sequence is repeat or scan")
         for k, cfg in enumerate(cfgs):
-            bad = [p for p in C.check_config(cfg, check_paths=not st.settings.use_simulator) if p.level == "error"]
+            bad = [p for p in C.check_config(cfg, check_paths=True) if p.level == "error"]
             if bad:
                 raise C.ConfigError(f"run {k + 1} ({labels[k]}): {bad[0].where}: {bad[0].message}")
         return labels, cfgs

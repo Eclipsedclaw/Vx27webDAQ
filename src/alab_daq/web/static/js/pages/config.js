@@ -6,7 +6,7 @@ import { post, put } from "../api.js";
 import { T, t } from "../i18n.js";
 import { CONF_FILES, basename, chip, choosePath, clear, confirmDialog, dialog, fail, fmtBytes, fmtInt, fmtNum, h, icon, segmented,
          setText, splitter, store, toast, toggle } from "../ui.js";
-import { ROLE_NAMES, SETUP_NAMES, viewerNotice } from "./run.js";
+import { ROLE_NAMES, SETUP_NAMES, sendToBoards, viewerNotice } from "./run.js";
 
 const SETUP_TEXT = {
   master: T("Cables: CLK-OUT → CLK-IN and TRG-OUT → TRG-IN from the first board (the master, e.g. the VX2730) to the next, and so on along the chain. The master triggers on its own channels (the logic below) and sends its trigger out on TRG-OUT; every other board records when it arrives at its TRG-IN and passes it on. Every board records the same moments; the boards further down get the trigger a few ns later (a fixed delay: give them a little more pre-trigger)."),
@@ -51,6 +51,10 @@ export function configPage(root, app) {
     h("button.btn.btn-sm.btn-primary", { type: "button", disabled: !can, onclick: () => save(null) }, icon("download"), t("Save")),
     h("button.btn.btn-sm", { type: "button", disabled: !can, onclick: saveAs }, t("Save as…")),
     h("button.btn.btn-sm", { type: "button", disabled: !can, onclick: reload }, icon("reset"), t("Reload from file")),
+    h("span.sep"),
+    h("button.btn.btn-sm", { type: "button", disabled: !can, onclick: sendBoards,
+                             title: t("Reset every board switched on and send it the configuration now, as at the start of a run, without taking data") },
+      icon("send"), t("Send to boards")),
     h("span.spacer"), h("span.hint", t("Changes are kept on the server for the next run; Save writes them into a .json file."))));
 
   const form = h("div.stack", { style: "padding-right:4px" });
@@ -675,6 +679,11 @@ export function configPage(root, app) {
     const p = await choosePath({ title: t("Save the configuration"), want: "save", filters: CONF_FILES, start: c.path,
                                  name: c.path ? basename(c.path) : "alab_daq.json" });
     if (p) await save(p);
+  }
+
+  // Send to boards: the edits still waiting to go to the server go first, so the boards get what the page shows
+  function sendBoards() {
+    return sendToBoards(app, async () => { if (timer) { clearTimeout(timer); await send(false); } });
   }
 
   async function reload() {

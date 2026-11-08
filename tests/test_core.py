@@ -685,6 +685,34 @@ class DaqRunTests(unittest.TestCase):
         self.assertIn("connection lost", out)
         self.assertEqual(status["stop_reason"], "a board failed")
 
+    def test_send_to_boards(self):
+        """python -m alab_daq.daq apply: each board switched on is reset and given every setting of the plan, one
+        JSON line per board; a refused setting fails that board, an optional one is a warning."""
+        d = folder("apply")
+        cfg = C.lab_setup()
+        cfg.boards[0].io_dac_out = "Static"                 # optional: a board without DAC OUT goes on
+        path = os.path.join(d, "lab.json")
+        C.save_config(cfg, path)
+        env = dict(os.environ, PYTHONPATH=str(PROJECT / "src"), OMP_NUM_THREADS="1")
+
+        def apply(*extra):
+            p = subprocess.run([sys.executable, "-m", "alab_daq.daq", "apply", path, *extra], capture_output=True,
+                               text=True, env=env, timeout=60)
+            return p.returncode, [json.loads(x) for x in p.stdout.splitlines() if x.startswith("{")]
+        code, res = apply("--simulate", "--rate 20")
+        self.assertEqual((code, [r["name"] for r in res]), (0, ["vx2730", "vx2740a", "vx2740b"]))
+        self.assertTrue(all(r["ok"] and not r["warnings"] for r in res), res)
+        self.assertEqual([(r["record_length"], r["pre_trigger"]) for r in res], [(2048, 512), (512, 128), (512, 128)])
+        self.assertEqual(res[0]["sent"], len(C.plan(cfg, 0, models.from_board({"model": "VX2730", "channels": 16}))))
+        code, res = apply("--simulate", "--fail param:vx2740a:ChEnable --fail param:vx2730:DACoutMode")
+        self.assertEqual(code, 1)
+        self.assertEqual([r["ok"] for r in res], [True, False, True])
+        self.assertIn("DACoutMode", res[0]["warnings"][0])
+        self.assertIn("refused /ch/0..63/par/ChEnable", res[1]["error"])
+        code, res = apply("--simulate", "--fail open:vx2740b", "--board", "vx2740b")
+        self.assertEqual((code, len(res), res[0]["name"], res[0]["ok"]), (1, 1, "vx2740b", False))
+        self.assertIn("cannot connect", res[0]["error"])
+
     def test_board_checks(self):
         """The firmware must be Scope, the model the configuration's (a real board says what it is)."""
         from alab_daq.daq.engine import Run

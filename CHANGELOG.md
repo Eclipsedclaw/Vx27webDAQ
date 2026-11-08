@@ -5,6 +5,11 @@ What changed in each version of ALAB DAQ. Write the notes of the next version un
 
 ## Unreleased
 
+## v0.0.17 (2026-11-08)
+
+- Simulated runs write their data into the data folder's `simulated/` subfolder (e.g. /NAS/ALAB_DAQ_DATA/simulated/run00001_BOARD.raw), numbered on their own, instead of inside the run folder; the Start question and the summary say where. A run does not make the data folder itself (the NAS not mounted).
+- Send to boards (Run page and Configuration page, operators): every board switched on is reset and given every parameter of the configuration being edited, now, as at the start of a run, without taking data (`python -m alab_daq.daq apply`); a line per board: taken, warnings, or the parameter refused. Not during a run or a sequence; a run does not start while it goes.
+
 ## v0.0.16 (2026-11-08)
 
 - With the simulator on, Start run (and a sequence) warns plainly that simulated boards are used, not the CAEN cards, says how to switch it off (Settings → simulator → Save settings) and offers Open Settings; the start button reads Start simulated run.

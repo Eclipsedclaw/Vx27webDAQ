@@ -2,6 +2,9 @@
 
     python -m alab_daq.daq run RUN_FOLDER [--simulate "OPTIONS"]
         one run of the boards of RUN_FOLDER/config.json (see engine.py); the web server starts it
+    python -m alab_daq.daq apply CONFIG.json [--simulate "OPTIONS"] [--board NAME]...
+        send the configuration to its boards now (Send to boards): each board switched on is reset and given every
+        parameter, as at the start of a run, without taking data; one JSON line per board
     python -m alab_daq.daq param CONFIG.json --board NAME (--get PATH | --set PATH VALUE | --cmd COMMAND)
         one parameter of one board, or one command to it (the Boards tool's manual controller; not during a run)
     python -m alab_daq.daq check CONFIG.json [--simulate "OPTIONS"] [--trees FOLDER] [--board NAME]...
@@ -65,6 +68,86 @@ def check(args) -> int:
     return code
 
 
+def apply(args) -> int:
+    """Send the configuration to its boards: each board switched on (in chain order: its place decides its
+    settings) is checked like at the start of a run, reset, and given every setting of plan(); a refused setting
+    with an alternative, or an optional one, is a warning, any other ends that board (the same rules as a run).
+    One JSON line per board: ok, sent (settings set), warnings, error, record_length, pre_trigger."""
+    from alab_daq.core import config as C
+    from alab_daq.core import models
+    from alab_daq.daq.boards import BoardError, open_board
+    try:
+        cfg, _ = C.load_config(args.config)
+    except (OSError, C.ConfigError) as err:
+        print(json.dumps({"error": str(err)}), flush=True)
+        return 1
+    active = [b for _, b in cfg.active()]
+    crate = None
+    if args.simulate is not None:
+        from alab_daq.daq.sim import Crate
+        try:
+            crate = Crate(args.simulate, "none", {b.name: b.model for b in active},
+                          {b.name: len(b.channels) for b in active})
+        except ValueError as err:
+            print(json.dumps({"error": f"simulator: {err}"}), flush=True)
+            return 1
+    code = 0
+    for k, b in enumerate(active):
+        if args.board and b.name not in args.board:
+            continue
+        out = {"name": b.name, "uri": b.uri, "ok": False, "sent": 0, "warnings": [], "time": time.time()}
+        board = None
+        try:
+            board = open_board(b.uri, crate, b.name)
+            f = board.identify()
+            if f.get("fw_type", "").lower() != "scope":
+                raise BoardError(f"it runs the {f.get('fw_type', 'unknown')} firmware; ALAB DAQ needs the Scope firmware")
+            fam, want = models.family(f.get("model", "")), models.family(b.model)
+            if fam and want and fam != want:
+                raise BoardError(f"it is a {f['model']}; the configuration says {b.model}")
+            if f.get("channels") and f["channels"] != len(b.channels):
+                raise BoardError(f"it has {f['channels']} channels; the configuration has {len(b.channels)}")
+            m = models.from_board(f) if f.get("channels") else models.model(b.model)
+            board.cmd("Reset")
+            refused: set = set()
+
+            def send(s):
+                name = s.path.rsplit("/", 1)[-1].lower()
+                if name in refused:
+                    return
+                try:
+                    board.set(s.path, s.value)
+                    out["sent"] += 1
+                except BoardError as err:
+                    if not (s.optional or s.alt):
+                        raise BoardError(f"the board refused {s.path} = {s.value}: {err}") from None
+                    refused.add(name)
+                    out["warnings"].append(f"the board refused {s.path} = {s.value} ({err}); "
+                                           + ("its alternative was sent" if s.alt else "a run goes on without it"))
+                    for a in s.alt:
+                        if a.path:
+                            send(a)
+            for s in C.plan(cfg, k, m):
+                send(s)
+            try:
+                out["record_length"] = int(float(board.get("/par/RecordLengthS")))
+                out["pre_trigger"] = int(float(board.get("/par/PreTriggerS")))
+                if out["record_length"] != b.record_length or out["pre_trigger"] != b.pre_trigger:
+                    out["warnings"].append(f"the board made the record {out['record_length']} samples and the "
+                                           f"pre-trigger {out['pre_trigger']} (asked: {b.record_length}, {b.pre_trigger})")
+            except (BoardError, ValueError) as err:
+                out["warnings"].append(f"cannot read the record length back: {err}")
+            out["ok"] = True
+        except BoardError as err:
+            out["error"] = str(err)
+            code = 1
+        finally:
+            if board is not None:
+                board.close()
+        print(json.dumps(out), flush=True)
+    return code
+
+
 def param(args) -> int:
     """Get or set one parameter of one board, or send it a command: one JSON line {ok, value | error}."""
     from alab_daq.core import config as C
@@ -115,6 +198,10 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--simulate", default=None, metavar="OPTIONS")
     c.add_argument("--trees", default=None, metavar="FOLDER", help="save each board's parameter tree here")
     c.add_argument("--board", action="append", default=[], help="only this board (by name); may repeat")
+    a = sub.add_parser("apply", help="send the configuration to its boards now, without taking data")
+    a.add_argument("config")
+    a.add_argument("--simulate", default=None, metavar="OPTIONS")
+    a.add_argument("--board", action="append", default=[], help="only this board (by name); may repeat")
     p = sub.add_parser("param", help="get or set one parameter of a board, or send it a command")
     p.add_argument("config")
     p.add_argument("--board", required=True)
@@ -134,6 +221,8 @@ def main(argv: list[str] | None = None) -> int:
         return run.main()
     if args.command == "param":
         return param(args)
+    if args.command == "apply":
+        return apply(args)
     return check(args)
 
 
