@@ -1,6 +1,8 @@
 # Vx27webDAQ
 
 A web page for multi-board data taking with CAEN Digitizer 2.0 boards — **V2740** (64 channels, 16 bit, 125 MS/s), **V2730** (32 channels, 14 bit, 500 MS/s), also V2745 — running the **Scope firmware** (the firmware CAEN's WaveDump2 uses). It configures the boards, runs them synchronized on one clock (a CLK-OUT → CLK-IN chain), shows the run live (every board's state and rates, the waveforms of any board and channel), keeps every board's data losslessly, and converts them to ROOT. One server runs on the DAQ computer for the whole lab, and everyone opens it in their own browser. It is built on the design of XIAOLAB DAQ, the lab's page for its AD9694 readout (the same pages, accounts and safety), with its own DAQ program in place of testDAQ.
+<img width="2555" height="903" alt="Screenshot 2026-11-09 at 4 51 18 PM" src="https://github.com/user-attachments/assets/d7cf4806-adbd-4b4b-8e61-5a6223f71e78" />
+
 
 **State (v0.0.0, 2026-11-07):** complete and tested with simulated boards; **not yet tried on real boards** (none was reachable from the computer where it was built). See [What is verified](#what-is-verified-and-what-is-not).
 
