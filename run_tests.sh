@@ -13,14 +13,14 @@ fi
 export PYTHONPATH="$app/src${PYTHONPATH:+:$PYTHONPATH}"
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 # test files, the save folders, the server's settings and accounts, and every runtime and cache file stay
-# inside .test_tmp (another place: set ALAB_DAQ_TEST_TMP, e.g. when this folder is not yours): HOME and
+# inside .test_tmp (another place: set VX27WEBDAQ_TEST_TMP, e.g. when this folder is not yours): HOME and
 # the XDG folders point into it
-export ALAB_DAQ_TEST_TMP="${ALAB_DAQ_TEST_TMP:-$here/.test_tmp}"
-mkdir -p "$ALAB_DAQ_TEST_TMP/runtime" "$ALAB_DAQ_TEST_TMP/cache" "$ALAB_DAQ_TEST_TMP/config" \
-         "$ALAB_DAQ_TEST_TMP/home" "$ALAB_DAQ_TEST_TMP/tmp"
-chmod 700 "$ALAB_DAQ_TEST_TMP/runtime"
-export HOME="$ALAB_DAQ_TEST_TMP/home" TMPDIR="$ALAB_DAQ_TEST_TMP/tmp"
-export XDG_RUNTIME_DIR="$ALAB_DAQ_TEST_TMP/runtime" XDG_CACHE_HOME="$ALAB_DAQ_TEST_TMP/cache"
-export XDG_CONFIG_HOME="$ALAB_DAQ_TEST_TMP/config" XDG_STATE_HOME="$ALAB_DAQ_TEST_TMP/state"
-echo "Testing the code in $app/src with $app/ALAB_ENV"
-exec "$app/ALAB_ENV/bin/python" -m unittest discover -s "$here/tests" -t "$here" "$@"
+export VX27WEBDAQ_TEST_TMP="${VX27WEBDAQ_TEST_TMP:-$here/.test_tmp}"
+mkdir -p "$VX27WEBDAQ_TEST_TMP/runtime" "$VX27WEBDAQ_TEST_TMP/cache" "$VX27WEBDAQ_TEST_TMP/config" \
+         "$VX27WEBDAQ_TEST_TMP/home" "$VX27WEBDAQ_TEST_TMP/tmp"
+chmod 700 "$VX27WEBDAQ_TEST_TMP/runtime"
+export HOME="$VX27WEBDAQ_TEST_TMP/home" TMPDIR="$VX27WEBDAQ_TEST_TMP/tmp"
+export XDG_RUNTIME_DIR="$VX27WEBDAQ_TEST_TMP/runtime" XDG_CACHE_HOME="$VX27WEBDAQ_TEST_TMP/cache"
+export XDG_CONFIG_HOME="$VX27WEBDAQ_TEST_TMP/config" XDG_STATE_HOME="$VX27WEBDAQ_TEST_TMP/state"
+echo "Testing the code in $app/src with $app/VX27_ENV"
+exec "$app/VX27_ENV/bin/python" -m unittest discover -s "$here/tests" -t "$here" "$@"

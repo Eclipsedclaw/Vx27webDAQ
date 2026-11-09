@@ -18,18 +18,18 @@ import unittest
 import numpy as np
 from aiohttp.test_utils import TestClient, TestServer
 
-from alab_daq.core import config as C
-from alab_daq.core import rawdata as R
-from alab_daq.web import runs as runs_module
-from alab_daq.web.accounts import AccountError, Accounts, check_password, hash_password
-from alab_daq.web.boardcheck import flatten
-from alab_daq.web.files import board_lines, envelope, event_summary, measure
-from alab_daq.web.settings import PROJECT, ServerSettings, save_settings
-from alab_daq.web.station import Station
+from vx27webdaq.core import config as C
+from vx27webdaq.core import rawdata as R
+from vx27webdaq.web import runs as runs_module
+from vx27webdaq.web.accounts import AccountError, Accounts, check_password, hash_password
+from vx27webdaq.web.boardcheck import flatten
+from vx27webdaq.web.files import board_lines, envelope, event_summary, measure
+from vx27webdaq.web.settings import PROJECT, ServerSettings, save_settings
+from vx27webdaq.web.station import Station
 
-TMP = os.environ.get("ALAB_DAQ_TEST_TMP", os.path.join(os.path.dirname(__file__), "..", ".test_tmp"))
-STATIC = PROJECT / "src" / "alab_daq" / "web" / "static"
-CHANGE = {"X-ALAB": "1"}
+TMP = os.environ.get("VX27WEBDAQ_TEST_TMP", os.path.join(os.path.dirname(__file__), "..", ".test_tmp"))
+STATIC = PROJECT / "src" / "vx27webdaq" / "web" / "static"
+CHANGE = {"X-VX27": "1"}
 NOTE = "Cs-137 源 at 10 cm\nHV 1450 V"
 PASSWORD = "correct horse 42"
 
@@ -76,6 +76,38 @@ class ViewTests(unittest.TestCase):
         rows = flatten(tree)
         self.assertEqual([r["path"] for r in rows], ["/par/modelname", "/ch/0/par/chenable"])
         self.assertEqual(rows[1]["allowedvalues"], "True, False")
+
+
+class RenameTests(unittest.TestCase):
+    def test_old_folders_move(self):
+        """After the rename (ALAB DAQ -> Vx27webDAQ): the settings and state folders of the old name move to the
+        new one, and a saved CAEN library folder of the old build becomes this build's own."""
+        from vx27webdaq.web.settings import load_settings, state_dir
+        root = os.path.abspath(os.path.join(TMP, "web", "rename"))
+        shutil.rmtree(root, ignore_errors=True)
+        old_cfg, old_state = os.path.join(root, "config", "alab_daq"), os.path.join(root, "state", "alab_daq")
+        os.makedirs(old_cfg)
+        os.makedirs(old_state)
+        with open(os.path.join(old_cfg, "web.json"), "w", encoding="utf-8") as f:
+            json.dump({"caen_lib_dir": "/opt/ALAB_DAQ_WEB/caen/lib", "runs_dir": "/somewhere", "refresh_ms": 300}, f)
+        with open(os.path.join(old_state, "accounts.json"), "w", encoding="utf-8") as f:
+            f.write("{}")
+        env = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "XDG_STATE_HOME")}
+        os.environ["XDG_CONFIG_HOME"], os.environ["XDG_STATE_HOME"] = os.path.join(root, "config"), os.path.join(root, "state")
+        try:
+            s = load_settings()
+            self.assertEqual((s.runs_dir, s.refresh_ms), ("/somewhere", 300))         # kept
+            self.assertEqual(s.caen_lib_dir, ServerSettings().caen_lib_dir)          # the old build's: not kept
+            self.assertTrue(os.path.isfile(os.path.join(root, "config", "vx27webdaq", "web.json")))
+            self.assertEqual(str(state_dir()), os.path.join(root, "state", "vx27webdaq"))
+            self.assertTrue(os.path.isfile(os.path.join(root, "state", "vx27webdaq", "accounts.json")))
+            self.assertFalse(os.path.exists(old_cfg) or os.path.exists(old_state))
+        finally:
+            for k, v in env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
 
 class AccountTests(unittest.TestCase):
@@ -128,7 +160,7 @@ class WebTestCase(unittest.IsolatedAsyncioTestCase):
         acc.add("view1", PASSWORD, "viewer")
 
     async def start_server(self):
-        from alab_daq.web.server import create_app
+        from vx27webdaq.web.server import create_app
         self.station = Station()
         client = TestClient(TestServer(create_app(self.station)))
         await client.start_server()
@@ -185,7 +217,7 @@ class RoleTests(WebTestCase):
 
     async def test_page_header_and_host(self):
         await self.login("oper1")
-        r = await self.client.post("/api/run/start", json={})            # no X-ALAB header: not from the page
+        r = await self.client.post("/api/run/start", json={})            # no X-VX27 header: not from the page
         self.assertEqual(r.status, 403)
         r = await self.client.get("/api/state", headers={"Host": "evil.example:80"})
         self.assertEqual(r.status, 403)
@@ -643,13 +675,13 @@ class CommandLineTests(unittest.TestCase):
         state = os.path.abspath(os.path.join(TMP, "web", "cli_state"))
         shutil.rmtree(state, ignore_errors=True)
         env = dict(os.environ, XDG_STATE_HOME=state, PYTHONPATH=str(PROJECT / "src"))
-        p = subprocess.run([sys.executable, "-m", "alab_daq.web", "user", "add", "carol", "--role", "operator",
+        p = subprocess.run([sys.executable, "-m", "vx27webdaq.web", "user", "add", "carol", "--role", "operator",
                             "--password-stdin"], input="a long password\n", capture_output=True, text=True, env=env)
         self.assertEqual(p.returncode, 0, p.stderr)
-        p = subprocess.run([sys.executable, "-m", "alab_daq.web", "user", "list"], capture_output=True, text=True, env=env)
+        p = subprocess.run([sys.executable, "-m", "vx27webdaq.web", "user", "list"], capture_output=True, text=True, env=env)
         self.assertIn("carol", p.stdout)
-        p = subprocess.run([sys.executable, "-m", "alab_daq.web", "--version"], capture_output=True, text=True, env=env)
-        self.assertIn("ALAB DAQ web v", p.stdout)
+        p = subprocess.run([sys.executable, "-m", "vx27webdaq.web", "--version"], capture_output=True, text=True, env=env)
+        self.assertIn("Vx27webDAQ web v", p.stdout)
 
 
 class PageTests(WebTestCase):
@@ -657,7 +689,7 @@ class PageTests(WebTestCase):
         r = await self.client.get("/")
         html = await r.text()
         self.assertEqual(r.status, 200)
-        self.assertIn("ALAB DAQ", html)
+        self.assertIn("Vx27webDAQ", html)
         self.assertNotIn("{{version}}", html)
         self.assertIn("default-src 'self'", r.headers["Content-Security-Policy"])
         for src in re.findall(r'(?:src|href)="(/static/[^"?]+)', html):
@@ -677,7 +709,7 @@ class PageTests(WebTestCase):
             zh = json.load(f)
         used = {text.replace("\\'", "'").replace('\\"', '"')
                 for _, text in re.findall(r"""\b[tT]\(\s*(["'])((?:\\.|(?!\1).)*)\1""", js)}
-        from alab_daq.web.accounts import ROLES
+        from vx27webdaq.web.accounts import ROLES
         used |= set(ROLES) | {"data", "runs", "home", "configuration", "CAEN libraries", "computer"}     # chooser places
         used |= {"ok", "failed", "mismatch", "cancelled", "exists"}                                     # conversions
         used |= {"stop record", "time-out", "error"}                                                    # how a board ended

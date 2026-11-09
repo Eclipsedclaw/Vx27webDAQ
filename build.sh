@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Build the ALAB DAQ web server into a folder of this computer, add the command alab-daq-web, and run
+# Build the Vx27webDAQ web server into a folder of this computer, add the command vx27webdaq, and run
 # the server as a systemd service. Run ./setup.sh first, as your normal user; then, the first time:
 #
 #   sudo ./build.sh --service-user ACCOUNT --admin NAME      (ACCOUNT: the one that writes the data folder)
 #
 # and afterwards just  sudo ./build.sh  (the service keeps its account and port).
 #
-#   FOLDER           a name (the build goes to /opt/NAME) or an absolute path; default: ALAB_DAQ_WEB
+#   FOLDER           a name (the build goes to /opt/NAME) or an absolute path; default: Vx27webDAQ
 #   --service-user   the account that runs the server and the DAQ program (it must write the data folder);
 #                    needed the first time, then taken from the installed service
 #   --port N         where the server listens, on localhost only; default 8770 (or the installed one)
@@ -25,19 +25,21 @@
 # if anything fails, the earlier build is put back.
 #
 # Check a build, as your normal user:  ./run_tests.sh --build /opt/NAME
-# Remove it all:   sudo systemctl disable --now alab-daq-web; sudo rm -rf /opt/NAME
-#                  /usr/local/bin/alab-daq-web /etc/systemd/system/alab-daq-web.service
+# Remove it all:   sudo systemctl disable --now vx27webdaq; sudo rm -rf /opt/NAME
+#                  /usr/local/bin/vx27webdaq /etc/systemd/system/vx27webdaq.service
 set -euo pipefail
 umask 022                                       # every user can read and run the build
 src="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
-name=ALAB_DAQ_WEB
+name=Vx27webDAQ
 bin_dir=/usr/local/bin
 make_link=1
-command=alab-daq-web
+command=vx27webdaq
 service=1 service_user="" port="" admin="" unit_dir=/etc/systemd/system
-unit_name=alab-daq-web.service
+unit_name=vx27webdaq.service
+old_unit_name=alab-daq-web.service             # the service of the old name (ALAB DAQ, until v0.0.18)
+old_command=alab-daq-web
 python="${PYTHON:-/usr/bin/python3}"
-marker="ALAB DAQ build"                  # first line of BUILD_INFO: only such folders are replaced
+marker="Vx27webDAQ build"                  # first line of BUILD_INFO: only such folders are replaced
 
 fail() { echo "build.sh: $*" >&2; exit 1; }
 is_build() { [ -f "$1/BUILD_INFO" ] && [ "$(head -n 1 "$1/BUILD_INFO")" = "$marker" ]; }
@@ -80,6 +82,7 @@ if [ "$make_link" = 1 ]; then
 fi
 if [ "$service" = 1 ]; then
     installed="/etc/systemd/system/$unit_name"
+    [ -f "$installed" ] || installed="/etc/systemd/system/$old_unit_name"     # the first build after the rename
     if [ -f "$installed" ]; then                # the service keeps its account and port unless given anew
         service_user="${service_user:-$(sed -n 's/^User=//p' "$installed")}"
         port="${port:-$(sed -n 's/.* --port \([0-9]*\).*/\1/p' "$installed")}"
@@ -97,7 +100,7 @@ case "$port" in ''|*[!0-9]*) fail "--port needs a number, not '$port'" ;; esac
 if [ -n "$admin" ] && [ "$systemd" != 1 ]; then fail "--admin goes with the service (it makes the account in the service account's files)"; fi
 [ -f "$src/requirements.lock" ] || fail "requirements.lock is missing in $src"
 ls "$src"/wheels/*.whl >/dev/null 2>&1 || fail "no packages in $src/wheels: run ./setup.sh first (as your normal user)"
-[ -d "$src/src/alab_daq/web" ] || fail "the code is missing: $src/src/alab_daq/web"
+[ -d "$src/src/vx27webdaq/web" ] || fail "the code is missing: $src/src/vx27webdaq/web"
 [ -x "$python" ] || fail "no Python at $python (set PYTHON=...)"
 
 # the git version of this folder, read only: as root, git may read this folder of another user
@@ -137,14 +140,14 @@ created=1
 # 1. Python environment, from wheels/ only (no network; no pip.conf may add other sources)
 export PIP_CONFIG_FILE=/dev/null
 unset PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_FIND_LINKS PIP_NO_INDEX
-"$python" -m venv --prompt ALAB_ENV "$dest/ALAB_ENV"
-py="$dest/ALAB_ENV/bin/python"
+"$python" -m venv --prompt VX27_ENV "$dest/VX27_ENV"
+py="$dest/VX27_ENV/bin/python"
 "$py" -m pip --disable-pip-version-check install --no-cache-dir --quiet --root-user-action=ignore \
     --no-index --find-links "$src/wheels" -r "$src/requirements.lock"
 
 # 2. the code and the page, compiled here once, so that no user has to write .pyc files
 mkdir "$dest/src"
-cp -R "$src/src/alab_daq" "$dest/src/"
+cp -R "$src/src/vx27webdaq" "$dest/src/"
 find "$dest/src" -name __pycache__ -prune -exec rm -rf {} +
 "$py" -m compileall -q "$dest/src" >/dev/null
 cp "$src/run_web.sh" "$src/README.md" "$src/CHANGELOG.md" "$src/requirements.lock" "$dest/"
@@ -160,17 +163,17 @@ fi
 # 3. check the build: the code loads from it, with its packages, and the page is complete
 version="$(cd "$dest" && env -i PATH=/usr/bin:/bin PYTHONPATH="$dest/src" "$py" -B -c '
 import sys
-import alab_daq
+import vx27webdaq
 import uproot, aiohttp, importlib.util
 if importlib.util.find_spec("caen_felib") is None:
     sys.exit("the package caen_felib is missing")
-from alab_daq.web.server import STATIC, create_app
-if not alab_daq.__file__.startswith(sys.argv[1] + "/"):
-    sys.exit("the code was loaded from " + alab_daq.__file__)
+from vx27webdaq.web.server import STATIC, create_app
+if not vx27webdaq.__file__.startswith(sys.argv[1] + "/"):
+    sys.exit("the code was loaded from " + vx27webdaq.__file__)
 for need in ("index.html", "js/app.js", "i18n/zh.json", "vendor/uplot/uPlot.iife.min.js"):
     if not (STATIC / need).is_file():
         sys.exit("the page lacks " + need)
-print(alab_daq.__version__)' "$dest/src")"
+print(vx27webdaq.__version__)' "$dest/src")"
 
 # 4. build record, permissions, the command
 {
@@ -192,7 +195,7 @@ if [ "$make_link" = 1 ]; then
 fi
 finished=1
 if [ "$moved_old" = 1 ]; then rm -rf "$old"; fi
-echo "Built $dest (ALAB DAQ v$version, commit $revision)."
+echo "Built $dest (Vx27webDAQ v$version, commit $revision)."
 if [ -n "$before" ] && [ "$before" != "$dest/run_web.sh" ]; then
     echo "Note: $command started $before until now; from now on it starts this build"
 fi
@@ -203,7 +206,7 @@ if [ "$service" = 1 ]; then
     cat > "$tmp_unit" <<UNIT
 # Made by $src/build.sh on $(date '+%Y-%m-%d %H:%M:%S'); build.sh writes it again on every build.
 [Unit]
-Description=ALAB DAQ web server (multi-board runs of CAEN Digitizer 2.0 boards)
+Description=Vx27webDAQ web server (multi-board runs of CAEN Digitizer 2.0 boards)
 Documentation=file://$dest/README.md
 After=network-online.target remote-fs.target
 Wants=network-online.target
@@ -224,6 +227,18 @@ UNIT
     chmod 644 "$tmp_unit"
     mv "$tmp_unit" "$unit"
     if [ "$systemd" = 1 ]; then
+        old_unit="/etc/systemd/system/$old_unit_name"
+        if [ -f "$old_unit" ]; then           # the old service goes (same port); a run going is not stopped
+            old_dest="$(sed -n 's/^ExecStart=\(.*\)\/run_web.sh .*/\1/p' "$old_unit")"
+            systemctl disable --now "$old_unit_name" >/dev/null 2>&1 || true
+            rm -f "$old_unit"
+            old_link="$bin_dir/$old_command"
+            if [ -L "$old_link" ]; then rm -f "$old_link"; fi
+            echo "Removed the old service $old_unit_name and the command $old_command (renamed to $unit_name, $command)."
+            if [ -n "$old_dest" ] && [ -d "$old_dest" ]; then
+                echo "The old build is still in $old_dest; once this one works:  sudo rm -rf $old_dest"
+            fi
+        fi
         systemctl daemon-reload
         systemctl enable "$unit_name" >/dev/null 2>&1
         systemctl restart "$unit_name"

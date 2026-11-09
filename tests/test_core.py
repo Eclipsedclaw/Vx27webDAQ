@@ -16,11 +16,11 @@ import unittest
 
 import numpy as np
 
-from alab_daq.core import config as C
-from alab_daq.core import models, rawdata as R
-from alab_daq.web.settings import PROJECT
+from vx27webdaq.core import config as C
+from vx27webdaq.core import models, rawdata as R
+from vx27webdaq.web.settings import PROJECT
 
-TMP = os.environ.get("ALAB_DAQ_TEST_TMP", os.path.join(os.path.dirname(__file__), "..", ".test_tmp"))
+TMP = os.environ.get("VX27WEBDAQ_TEST_TMP", os.path.join(os.path.dirname(__file__), "..", ".test_tmp"))
 
 
 def folder(name: str) -> str:
@@ -274,7 +274,7 @@ class GeneratorTests(unittest.TestCase):
         """The simulator's pulse generator: regular hits; a V2730 has a fast negative pulse on every channel at the
         trigger; a V2740 a positive pulse rising in 5 us (10-90 %) and decaying in 1 ms, channel k k x 5 us later
         (none where that is after the end of the record)."""
-        from alab_daq.daq.sim import Crate
+        from vx27webdaq.daq.sim import Crate
         cr = Crate("--generator staircase --rate 10", "none", {"a": "VX2730", "b": "VX2740"}, {"a": 16, "b": 64})
         a, b = cr.open("x", "a"), cr.open("y", "b")
         for board, rec, pre in ((a, 2048, 512), (b, 4096, 128)):
@@ -299,7 +299,7 @@ class GeneratorTests(unittest.TestCase):
 
 class SyncCheckTests(unittest.TestCase):
     def test_counts(self):
-        from alab_daq.daq.sync import SyncCheck
+        from vx27webdaq.daq.sync import SyncCheck
         ids = np.arange(100, dtype=np.int64)
         s = SyncCheck(["m", "a", "b"], 1000)
         a_ids = np.delete(ids, 50)                              # a lacks trigger 50
@@ -334,7 +334,7 @@ def run_daq(name: str, cfg: C.DaqConfig, options: str = "--rate 40 --seed 5", no
     os.makedirs(cfg.run.data_dir)
     C.save_config(cfg, os.path.join(d, "config.json"), note=note, run_name="run00007")
     env = dict(os.environ, PYTHONPATH=str(PROJECT / "src"), OMP_NUM_THREADS="1", PYTHONUNBUFFERED="1")
-    p = subprocess.Popen([sys.executable, "-m", "alab_daq.daq", "run", d, "--simulate", options], cwd=d, env=env,
+    p = subprocess.Popen([sys.executable, "-m", "vx27webdaq.daq", "run", d, "--simulate", options], cwd=d, env=env,
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if stop_after is not None:
         time.sleep(stop_after)
@@ -356,7 +356,7 @@ def small(cfg: C.DaqConfig, n_ch: int = 4, seconds: int = 2) -> C.DaqConfig:
 
 
 class DaqRunTests(unittest.TestCase):
-    """Whole runs of python -m alab_daq.daq with simulated boards (a few seconds each)."""
+    """Whole runs of python -m vx27webdaq.daq with simulated boards (a few seconds each)."""
 
     def files(self, d):
         raw = os.path.join(d, "raw")
@@ -434,7 +434,7 @@ class DaqRunTests(unittest.TestCase):
     def test_combined_set(self):
         """The live set of matched events: one event of every board from the same moment, and the combined view
         of the run's files pairs the boards by trigger ID."""
-        from alab_daq.web.files import DataFiles, combined_view
+        from vx27webdaq.web.files import DataFiles, combined_view
         cfg = small(C.lab_setup(), seconds=3)
         code, log, status, d = run_daq("combined", cfg, options="--rate 30 --seed 11")
         self.assertEqual(code, 0, log)
@@ -484,7 +484,7 @@ class DaqRunTests(unittest.TestCase):
     def test_housekeeping_and_sync(self):
         """Housekeeping every second into RUN_BOARD_hk.csv (and the ROOT file), the error-flag warning, and the
         sync check of the master trigger: every trigger on every board, at the same timestamp."""
-        from alab_daq.core import rootconv
+        from vx27webdaq.core import rootconv
         cfg = small(C.lab_setup(), seconds=3)
         cfg.run.hk_s = 1
         code, log, status, d = run_daq("hk_sync", cfg, options="--rate 30 --seed 4 --fail errflags:vx2740a:1")
@@ -532,7 +532,7 @@ class DaqRunTests(unittest.TestCase):
         os.makedirs(cfg.run.data_dir)
         C.save_config(cfg, os.path.join(d, "config.json"), run_name="run00007")
         env = dict(os.environ, PYTHONPATH=str(PROJECT / "src"), OMP_NUM_THREADS="1", PYTHONUNBUFFERED="1")
-        p = subprocess.Popen([sys.executable, "-m", "alab_daq.daq", "run", d, "--simulate", "--rate 5 --seed 2"], cwd=d,
+        p = subprocess.Popen([sys.executable, "-m", "vx27webdaq.daq", "run", d, "--simulate", "--rate 5 --seed 2"], cwd=d,
                              env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         try:
             status = os.path.join(d, "status.json")
@@ -610,7 +610,7 @@ class DaqRunTests(unittest.TestCase):
     def test_event_building(self):
         """Every board of a run in one ROOT file, one entry per trigger of the first board."""
         import uproot
-        from alab_daq.core import eventbuild
+        from vx27webdaq.core import eventbuild
         cfg = small(C.lab_setup(), seconds=2)
         code, log, status, d = run_daq("built", cfg, options="--rate 30 --seed 8")
         self.assertEqual(code, 0, log)
@@ -618,7 +618,7 @@ class DaqRunTests(unittest.TestCase):
         out = os.path.join(d, "raw", "run00007_built.root")
         self.assertEqual(eventbuild.built_name(files["run00007_vx2740b.raw"]), out)
         env = dict(os.environ, PYTHONPATH=str(PROJECT / "src"), OMP_NUM_THREADS="1")
-        p = subprocess.run([sys.executable, "-m", "alab_daq.core.eventbuild", files["run00007_vx2740b.raw"]], env=env,
+        p = subprocess.run([sys.executable, "-m", "vx27webdaq.core.eventbuild", files["run00007_vx2740b.raw"]], env=env,
                            capture_output=True, text=True, timeout=120)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         n = status["boards"][0]["events"]
@@ -686,7 +686,7 @@ class DaqRunTests(unittest.TestCase):
         self.assertEqual(status["stop_reason"], "a board failed")
 
     def test_send_to_boards(self):
-        """python -m alab_daq.daq apply: each board switched on is reset and given every setting of the plan, one
+        """python -m vx27webdaq.daq apply: each board switched on is reset and given every setting of the plan, one
         JSON line per board; a refused setting fails that board, an optional one is a warning."""
         d = folder("apply")
         cfg = C.lab_setup()
@@ -696,7 +696,7 @@ class DaqRunTests(unittest.TestCase):
         env = dict(os.environ, PYTHONPATH=str(PROJECT / "src"), OMP_NUM_THREADS="1")
 
         def apply(*extra):
-            p = subprocess.run([sys.executable, "-m", "alab_daq.daq", "apply", path, *extra], capture_output=True,
+            p = subprocess.run([sys.executable, "-m", "vx27webdaq.daq", "apply", path, *extra], capture_output=True,
                                text=True, env=env, timeout=60)
             return p.returncode, [json.loads(x) for x in p.stdout.splitlines() if x.startswith("{")]
         code, res = apply("--simulate", "--rate 20")
@@ -715,7 +715,7 @@ class DaqRunTests(unittest.TestCase):
 
     def test_board_checks(self):
         """The firmware must be Scope, the model the configuration's (a real board says what it is)."""
-        from alab_daq.daq.engine import Run
+        from vx27webdaq.daq.engine import Run
         d = folder("board_checks")
         C.save_config(small(C.default_config()), os.path.join(d, "config.json"), run_name="run00001")
         run = Run(d)
@@ -730,7 +730,7 @@ class DaqRunTests(unittest.TestCase):
 
     def test_real_board_errors(self):
         """Without libCAEN_FELib.so (or without a board at the address) a real board gives a BoardError, no crash."""
-        code = ("from alab_daq.daq.boards import RealBoard, BoardError\n"
+        code = ("from vx27webdaq.daq.boards import RealBoard, BoardError\n"
                 "try:\n    RealBoard('dig2://127.0.0.1')\nexcept BoardError as e:\n    print('BoardError:', e)")
         env = dict(os.environ, PYTHONPATH=str(PROJECT / "src"), LD_LIBRARY_PATH="")
         p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=90)
@@ -739,7 +739,7 @@ class DaqRunTests(unittest.TestCase):
 
 class RootTests(unittest.TestCase):
     def test_convert_and_check(self):
-        from alab_daq.core import rootconv
+        from vx27webdaq.core import rootconv
         import uproot
         cfg = small(C.default_config())
         cfg.trigger.setup = "self"
@@ -750,7 +750,7 @@ class RootTests(unittest.TestCase):
         with open(side, "w", encoding="utf-8") as f:
             json.dump({"note": "edited note"}, f)
         out_root = os.path.join(d, "raw", "run00007_b1.root")
-        p = subprocess.run([sys.executable, "-m", "alab_daq.core.rootconv", raw, out_root], capture_output=True, text=True,
+        p = subprocess.run([sys.executable, "-m", "vx27webdaq.core.rootconv", raw, out_root], capture_output=True, text=True,
                            env=dict(os.environ, PYTHONPATH=str(PROJECT / "src")))
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn("check:", p.stdout)
@@ -774,7 +774,7 @@ class RepositoryTests(unittest.TestCase):
 
     ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     SUFFIXES = (".py", ".js", ".css", ".html", ".svg", ".sh", ".md", ".toml", ".lock", ".txt")
-    OTHERS = {".gitignore", "src/alab_daq/web/static/i18n/zh.json", "src/alab_daq/web/static/vendor/uplot/LICENSE"}
+    OTHERS = {".gitignore", "src/vx27webdaq/web/static/i18n/zh.json", "src/vx27webdaq/web/static/vendor/uplot/LICENSE"}
 
     def git(self, *args, stdin=None):
         return subprocess.run(["git", "-C", self.ROOT, "--no-optional-locks", *args], input=stdin,
@@ -794,11 +794,11 @@ class RepositoryTests(unittest.TestCase):
         data = ["run00001_b0.raw", "elsewhere/run00001_b0_001.raw", "x/run00001_b0.root", "a.root.part", "live/b0.evt",
                 "data/run00001_b0.json", "runs/20261107_141418/config.json", "my_config.json", "ALAB_DAQ_data/a.json",
                 "ALAB_DAQ_runs/b/run.json", "status.json", "daq.log", "x.wbin", "caen/lib/libCAEN_Dig2.so",
-                "wheels/numpy.whl", "ALAB_ENV/bin/python", ".test_tmp/core/a.raw", "src/alab_daq/__pycache__/a.pyc"]
+                "wheels/numpy.whl", "VX27_ENV/bin/python", ".test_tmp/core/a.raw", "src/vx27webdaq/__pycache__/a.pyc"]
         out = self.git("check-ignore", "--no-index", "--stdin", stdin="\n".join(data)).stdout.split()
         self.assertEqual(sorted(set(data) - set(out)), [])
-        code = ["src/alab_daq/web/static/i18n/zh.json", "src/alab_daq/core/rawdata.py", "tests/test_core.py", "setup.sh",
-                "README.md", "src/alab_daq/web/static/vendor/uplot/uPlot.iife.min.js"]
+        code = ["src/vx27webdaq/web/static/i18n/zh.json", "src/vx27webdaq/core/rawdata.py", "tests/test_core.py", "setup.sh",
+                "README.md", "src/vx27webdaq/web/static/vendor/uplot/uPlot.iife.min.js"]
         self.assertEqual(self.git("check-ignore", "--no-index", "--stdin", stdin="\n".join(code)).stdout.split(), [])
 
 

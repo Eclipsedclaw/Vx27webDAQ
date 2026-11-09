@@ -6,7 +6,7 @@
 #   ./caen_libs.sh [--jobs N] [--with-boost DIR]
 #
 #   caen/src/       the sources (git, at the pinned commits)
-#   caen/lib/       libCAEN_FELib.so and libCAEN_Dig2.so: ALAB DAQ loads them from here (the server sets
+#   caen/lib/       libCAEN_FELib.so and libCAEN_Dig2.so: Vx27webDAQ loads them from here (the server sets
 #                   LD_LIBRARY_PATH for the DAQ program; build.sh copies them into the build)
 #   caen/include/   the headers
 #
@@ -82,13 +82,13 @@ if [ ! -f "$prefix/lib/libCAEN_Dig2.so" ]; then
     if [ -n "$boost" ]; then build caen-dig2 --with-boost="$boost"; else build caen-dig2; fi
 fi
 {
-    echo "CAEN libraries for ALAB DAQ, built $(date '+%Y-%m-%d %H:%M:%S') by $(id -un) with $(gcc -dumpfullversion 2>/dev/null || gcc -dumpversion)"
+    echo "CAEN libraries for Vx27webDAQ, built $(date '+%Y-%m-%d %H:%M:%S') by $(id -un) with $(gcc -dumpfullversion 2>/dev/null || gcc -dumpversion)"
     echo "caen-felib $FELIB_COMMIT ($FELIB_REPO)"
     echo "caen-dig2  $DIG2_COMMIT ($DIG2_REPO)"
 } > "$prefix/VERSIONS"
 # the libraries load and know each other: FELib finds Dig2 by name (libCAEN_Dig2.so) on LD_LIBRARY_PATH
-if [ -x ALAB_ENV/bin/python ]; then
-    LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ALAB_ENV/bin/python -c "
+if [ -x VX27_ENV/bin/python ]; then
+    LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" VX27_ENV/bin/python -c "
 from caen_felib import lib
 print('CAEN FELib', lib.version, 'loads from', '$prefix/lib')"
 fi

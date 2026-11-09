@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version numbers of ALAB DAQ: vMAJOR.MINOR.PATCH, kept in src/alab_daq/__init__.py.
+# Version numbers of Vx27webDAQ: vMAJOR.MINOR.PATCH, kept in src/vx27webdaq/__init__.py.
 # Every change adds 1 to PATCH. MINOR (a bigger step) and MAJOR (major changes, releases) change only
 # when you choose so:
 #
@@ -16,7 +16,7 @@
 # pushes (git push origin main --tags does, when you choose). Options after -- go to git commit (e.g. --trailer "...").
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
-init=src/alab_daq/__init__.py
+init=src/vx27webdaq/__init__.py
 log=CHANGELOG.md
 
 fail() { echo "version.sh: $*" >&2; exit 1; }

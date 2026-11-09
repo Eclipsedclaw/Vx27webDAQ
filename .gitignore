@@ -1,7 +1,7 @@
 # Only the code, the scripts and their documents belong in git; no data, ever (tests/test_core.py checks it).
 
 # made by setup.sh
-/ALAB_ENV/
+/VX27_ENV/
 /wheels/
 
 # made by caen_libs.sh (CAEN FELib and CAEN Dig2: sources and the built libraries)

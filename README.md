@@ -1,8 +1,8 @@
-# ALAB DAQ
+# Vx27webDAQ
 
 A web page for multi-board data taking with CAEN Digitizer 2.0 boards — **V2740** (64 channels, 16 bit, 125 MS/s), **V2730** (32 channels, 14 bit, 500 MS/s), also V2745 — running the **Scope firmware** (the firmware CAEN's WaveDump2 uses). It configures the boards, runs them synchronized on one clock (a CLK-OUT → CLK-IN chain), shows the run live (every board's state and rates, the waveforms of any board and channel), keeps every board's data losslessly, and converts them to ROOT. One server runs on the DAQ computer for the whole lab, and everyone opens it in their own browser. It is built on the design of XIAOLAB DAQ, the lab's page for its AD9694 readout (the same pages, accounts and safety), with its own DAQ program in place of testDAQ.
 
-**State (v0.0.0, 2026-11-07):** complete and tested with simulated boards; **not yet tried on real boards** (none was reachable from dbar, where it was built). See [What is verified](#what-is-verified-and-what-is-not).
+**State (v0.0.0, 2026-11-07):** complete and tested with simulated boards; **not yet tried on real boards** (none was reachable from the computer where it was built). See [What is verified](#what-is-verified-and-what-is-not).
 
 ## Open the page
 
@@ -22,7 +22,7 @@ Then open **http://localhost:8770**. With VS Code Remote-SSH, add port 8770 on t
 | **operator** | and control the DAQ: check the boards, start, stop and kill runs; edit, save and open the configuration; change the server settings |
 | **admin** | and manage the accounts (add, role, new password, remove), decide whether guests may look in, and read the activity log |
 
-Passwords are set by an admin (Users page, or the command line below); each user can change their own (account menu, top right). Every action is written to the activity log with the account that did it, and every run's `run.json` says who started and stopped it. The account list is ALAB DAQ's own (not XIAOLAB DAQ's).
+Passwords are set by an admin (Users page, or the command line below); each user can change their own (account menu, top right). Every action is written to the activity log with the account that did it, and every run's `run.json` says who started and stopped it. The account list is Vx27webDAQ's own (not XIAOLAB DAQ's).
 
 ## The pages
 
@@ -38,7 +38,7 @@ Every page works in light and dark and in English and 中文; the dividers can b
 
 ## How a run works
 
-The server never talks to the boards itself. **Send to boards** runs `python -m alab_daq.daq apply CONFIG.json` (one JSON line per board), **Check boards** `python -m alab_daq.daq check CONFIG.json`, the manual controller `python -m alab_daq.daq param`. For a run it writes the configuration (with the note and the run's name, e.g. `run00012`) into a new run folder, and starts the **DAQ program** (`python -m alab_daq.daq run FOLDER`) apart from itself, so **a run goes on when the server stops or restarts**: the next server finds it and follows it to its end. The DAQ program follows CAEN's own multi-board recipe (the sync demo of [caen-dig2](https://github.com/caenspa/caen-dig2), `demo/caen-felib-demo-sync`):
+The server never talks to the boards itself. **Send to boards** runs `python -m vx27webdaq.daq apply CONFIG.json` (one JSON line per board), **Check boards** `python -m vx27webdaq.daq check CONFIG.json`, the manual controller `python -m vx27webdaq.daq param`. For a run it writes the configuration (with the note and the run's name, e.g. `run00012`) into a new run folder, and starts the **DAQ program** (`python -m vx27webdaq.daq run FOLDER`) apart from itself, so **a run goes on when the server stops or restarts**: the next server finds it and follows it to its end. The DAQ program follows CAEN's own multi-board recipe (the sync demo of [caen-dig2](https://github.com/caenspa/caen-dig2), `demo/caen-felib-demo-sync`):
 
 1. connects to every board, one after the other, checks that it runs the Scope firmware and is the model the configuration says;
 2. resets it and sets its parameters (the list under *What this board gets*), activates the raw data endpoint;
@@ -71,24 +71,24 @@ The server never talks to the boards itself. **Send to boards** runs `python -m 
 | Each board's data | `DATA_FOLDER/RUN_BOARD.raw` (the data folder of the configuration; by default `/NAS/ALAB_DAQ_DATA/`, which must exist and be writable by the service account), e.g. `run00012_b0.raw` (the run number is one more than the highest in the data folder); a new file `_001.raw`, `_002.raw`, … at the file size of the configuration |
 | Their settings and note | the header of each `.raw` file, and `NAME.json` next to it (the configuration, the note — it follows edits during the run — and the run's facts) |
 | ROOT files | `NAME.root` next to `NAME.raw`, after the run (`NAME.root.part` until it is checked) |
-| Every board per trigger | `RUN_built.root` beside the run's files (WaveDump2's multi-board single file), after every run of several boards (Settings) or from the Data file tool: TTree `events`, one entry per event of the first board: `trigger_id`, `timestamp`, `time_ns`, `n_boards`, `complete`, and per board `BOARD_found`, `BOARD_timestamp`, `BOARD_dt_ns` and `BOARD_chN` (UShort_t[n], zeros where the board lacks the trigger); matched by trigger ID within the sync window. By hand: `python -m alab_daq.core.eventbuild RUN_BOARD.raw` |
+| Every board per trigger | `RUN_built.root` beside the run's files (WaveDump2's multi-board single file), after every run of several boards (Settings) or from the Data file tool: TTree `events`, one entry per event of the first board: `trigger_id`, `timestamp`, `time_ns`, `n_boards`, `complete`, and per board `BOARD_found`, `BOARD_timestamp`, `BOARD_dt_ns` and `BOARD_chN` (UShort_t[n], zeros where the board lacks the trigger); matched by trigger ID within the sync window. By hand: `python -m vx27webdaq.core.eventbuild RUN_BOARD.raw` |
 | Text export | the Data file tool: events *from … count* (at most 1000) and channels as a download, laid out like WaveDump2's ASCII files |
 | Board housekeeping | `RUN_BOARD_hk.csv` next to the board's data (in the run folder's `hk/` when no data are kept): every *housekeeping* seconds (Configuration, Run; 5 s) a row: `time` (Unix s), `run_s`, the temperatures in °C (`temp_air_in`, `temp_air_out`, `temp_core`, `temp_first_adc`, `temp_last_adc`, `temp_hottest_adc`, `temp_dcdc`), fans, DC-DC, `error_flags`, `acq_status`, `trigger_cnt`, `lost_trigger_cnt`, `realtime`, `deadtime`, `livetime` (as the board gives them: CAEN FELib's TempSens…, ErrorFlags, TriggerCnt, LostTriggerCnt, …Monitor), each channel's `chN_trg_rate` (SelfTrgRate, Hz), and `events`, `icr_hz`, `rate_hz`, `dead_frac` worked out between two readings. A value the board does not have is left out. The last row is read after the stop |
 | Run records | `<save folder>/<date>_<time>/`: `config.json`, `daq.log`, `status.json`, `run.json`, `live/`, `rootconv.log`; the save folder is a server setting (default `/NAS/ALAB_DAQ_DATA`, beside the data files; empty means the same) |
 | Simulator data | `DATA_FOLDER/simulated/` (by default `/NAS/ALAB_DAQ_DATA/simulated/`), numbered on their own (`run00001`, …), never among the real runs' files; the data folder must exist (the NAS mounted): only `simulated/` is made |
-| Server settings | `~/.config/alab_daq/web.json` of the service account |
-| Accounts, sign-ins, activity log, the configuration being edited, the run being followed, board checks | `~/.local/state/alab_daq/` of the service account (only that account can read it) |
+| Server settings | `~/.config/vx27webdaq/web.json` of the service account |
+| Accounts, sign-ins, activity log, the configuration being edited, the run being followed, board checks | `~/.local/state/vx27webdaq/` of the service account (only that account can read it) |
 
-**`.raw` files** keep the board's stream exactly as the board sent it (lossless, like WaveDump2's Fast Save): a 16-byte prefix (`ALABRAW1`, the header length), a JSON header (the board's model, serial, firmware, sample time, every parameter as it was set, the run's configuration and note), then the board's 64-bit big-endian words. Each event: word 1 = format 1 (bits 63–60), board fail (56), trigger ID (55–32), size in words (31–0); word 2 = flags (63–51), samples overlapped (50–48), timestamp in 8 ns (47–0); word 3 = the channel mask; then, for every 4 samples, one word per channel of the mask with 4 samples of 16 bits, the first in the lowest bits. Run start and stop records are special events (format 3). This is the layout of CAEN's decoder (`caen-dig2/src/endpoints/scope.cpp`, `events.cpp`). `python -m alab_daq.core.rawdata FILE.raw` says what a file holds; `alab_daq.core.rawdata.RawFile` reads one in Python (`len(f)`, `f.event(k)`, `f.headers()`, `f.batches()`).
+**`.raw` files** keep the board's stream exactly as the board sent it (lossless, like WaveDump2's Fast Save): a 16-byte prefix (`ALABRAW1`, the header length), a JSON header (the board's model, serial, firmware, sample time, every parameter as it was set, the run's configuration and note), then the board's 64-bit big-endian words. Each event: word 1 = format 1 (bits 63–60), board fail (56), trigger ID (55–32), size in words (31–0); word 2 = flags (63–51), samples overlapped (50–48), timestamp in 8 ns (47–0); word 3 = the channel mask; then, for every 4 samples, one word per channel of the mask with 4 samples of 16 bits, the first in the lowest bits. Run start and stop records are special events (format 3). This is the layout of CAEN's decoder (`caen-dig2/src/endpoints/scope.cpp`, `events.cpp`). `python -m vx27webdaq.core.rawdata FILE.raw` says what a file holds; `vx27webdaq.core.rawdata.RawFile` reads one in Python (`len(f)`, `f.event(k)`, `f.headers()`, `f.batches()`).
 
-**ROOT files:** one TTree `events` per board file, one entry per trigger: `trigger_id` (UInt_t), `timestamp` (ULong64_t, 8 ns since the start of the run, the same clock on every board of a chain), `time_ns`, `flags`, `board_fail`, `samples_overlapped`, `ch_mask`, `n_samples`, and `ch0`, `ch1`, … (UShort_t[n_samples], raw ADC counts) for each channel read out; plus the strings `settings` (the header) and `note`, and a TTree `hk`: the board's housekeeping file, one entry per reading, a Double_t branch per column (an empty cell is NaN). In PyROOT: `t = ROOT.TFile("run00012_b0.root").events; t.GetEntry(0); list(t.ch0)`. Each file is read back and compared with the `.raw` file before it gets its name. By hand: `python -m alab_daq.core.rootconv NAME.raw`.
+**ROOT files:** one TTree `events` per board file, one entry per trigger: `trigger_id` (UInt_t), `timestamp` (ULong64_t, 8 ns since the start of the run, the same clock on every board of a chain), `time_ns`, `flags`, `board_fail`, `samples_overlapped`, `ch_mask`, `n_samples`, and `ch0`, `ch1`, … (UShort_t[n_samples], raw ADC counts) for each channel read out; plus the strings `settings` (the header) and `note`, and a TTree `hk`: the board's housekeeping file, one entry per reading, a Double_t branch per column (an empty cell is NaN). In PyROOT: `t = ROOT.TFile("run00012_b0.root").events; t.GetEntry(0); list(t.ch0)`. Each file is read back and compared with the `.raw` file before it gets its name. By hand: `python -m vx27webdaq.core.rootconv NAME.raw`.
 
 ## What is verified and what is not
 
 Verified here, with the simulated boards (`./run_tests.sh`, 37 tests; and in headless Chromium): the raw format against CAEN's decoder layout (round trips, cut files, split files), CAEN's sync recipe value by value, every trigger setup (common triggers give the same trigger IDs and timestamps on every board), Stop, Kill, a server restart during a run, failures (a board that does not answer, refuses a parameter, is not armed, loses its link), ROOT files (also read with ROOT 6.36 itself), the board check, and every page in light, dark, English, Chinese and on a phone.
 
 **Not verified: the real boards.** To be checked on the first run with them:
-- the parameter names that are not in CAEN's demos but come from the WaveDump2 manual: `IOlevel`, `DecimationFactor`, `GPIOMode`, `VetoSource` (ALAB DAQ tries `BoardVetoSource` if refused), and the trigger and output values (`TrgIn`, `ITLA`, `SwTrg`, `TestPulse`). A board that refuses a parameter stops the configuration with its name, and the Boards tool shows the board's own parameter list; **Expert parameters** set anything directly;
+- the parameter names that are not in CAEN's demos but come from the WaveDump2 manual: `IOlevel`, `DecimationFactor`, `GPIOMode`, `VetoSource` (Vx27webDAQ tries `BoardVetoSource` if refused), and the trigger and output values (`TrgIn`, `ITLA`, `SwTrg`, `TestPulse`). A board that refuses a parameter stops the configuration with its name, and the Boards tool shows the board's own parameter list; **Expert parameters** set anything directly;
 - the threshold convention (relative, −N with Fall for negative pulses), and whether the run delays and clock-out delays need tuning for the cables (CAEN's values are the defaults);
 - `ITLConnect` per channel: firmware without it gets `ITLAMask` instead (tested with the simulator).
 
@@ -98,11 +98,11 @@ The DAQ computer is an Ubuntu computer: Ubuntu 24.04 LTS or newer (Python 3.12 o
 
 ```bash
 sudo apt install git python3-venv build-essential libboost-dev
-git clone git@github.com:OWNER/ALAB_DAQ.git      # the GitHub repository of this folder
-cd ALAB_DAQ
+git clone git@github.com:OWNER/Vx27webDAQ.git      # the GitHub repository of this folder
+cd Vx27webDAQ
 ```
 
-1. Once, as your normal user (no sudo), set up this folder: the exact packages of `requirements.lock` from PyPI into `wheels/`, and the Python environment `ALAB_ENV/`:
+1. Once, as your normal user (no sudo), set up this folder: the exact packages of `requirements.lock` from PyPI into `wheels/`, and the Python environment `VX27_ENV/`:
 
    ```bash
    ./setup.sh
@@ -116,17 +116,19 @@ cd ALAB_DAQ
 
    Or install CAEN FELib and CAEN Dig2 from CAEN's site and give their folder on the Settings page. Without them only the simulator runs.
 
-3. The first build: it goes to `/opt/ALAB_DAQ_WEB` (with the CAEN libraries), adds the command `alab-daq-web`, installs the systemd service `alab-daq-web` that runs the server as the account you name (the one that writes the data folder), and makes the first admin account:
+3. The first build: it goes to `/opt/Vx27webDAQ` (with the CAEN libraries), adds the command `vx27webdaq`, installs the systemd service `vx27webdaq` that runs the server as the account you name (the one that writes the data folder), and makes the first admin account:
 
    ```bash
    sudo ./build.sh --service-user ACCOUNT --admin NAME
    ```
 
-4. Every update: `git pull`, then `sudo ./build.sh` (a run that is going goes on; `./setup.sh` first when `requirements.lock` changed). Check a build with `./run_tests.sh --build /opt/ALAB_DAQ_WEB`; `BUILD_INFO` says its version, git commit and CAEN libraries.
+4. Every update: `git pull`, then `sudo ./build.sh` (a run that is going goes on; `./setup.sh` first when `requirements.lock` changed). Check a build with `./run_tests.sh --build /opt/Vx27webDAQ`; `BUILD_INFO` says its version, git commit and CAEN libraries.
 
-5. Accounts from the command line, as the service account: `sudo -u ACCOUNT alab-daq-web user add alice --role operator` (also `user list`, `user password NAME`, `user role NAME ROLE`, `user remove NAME`).
+**Upgrading from ALAB DAQ (v0.0.18 or older; the project was renamed in v0.0.19):** in the old clone, `git remote set-url origin git@github.com:Eclipsedclaw/Vx27webDAQ.git`, `git pull`, then `./setup.sh` (the environment is now `VX27_ENV/`; `rm -rf ALAB_ENV` afterwards) and `sudo ./build.sh`. The first build takes the account and port of the old service `alab-daq-web`, stops and removes it and its command, and installs `vx27webdaq` in `/opt/Vx27webDAQ`; the server moves the service account's `~/.config/alab_daq` and `~/.local/state/alab_daq` (settings, accounts, the configuration being edited, the run being followed) to `vx27webdaq`, and each browser keeps its choices. Everyone signs in once more. The data folder `/NAS/ALAB_DAQ_DATA` and the data files' formats stay as they were. Then `sudo rm -rf /opt/ALAB_DAQ_WEB` (build.sh says so).
 
-6. The service: `sudo systemctl status alab-daq-web`, `sudo systemctl restart alab-daq-web`, `sudo journalctl -u alab-daq-web`. Remove everything: `sudo systemctl disable --now alab-daq-web; sudo rm -rf /opt/ALAB_DAQ_WEB /usr/local/bin/alab-daq-web /etc/systemd/system/alab-daq-web.service`.
+5. Accounts from the command line, as the service account: `sudo -u ACCOUNT vx27webdaq user add alice --role operator` (also `user list`, `user password NAME`, `user role NAME ROLE`, `user remove NAME`).
+
+6. The service: `sudo systemctl status vx27webdaq`, `sudo systemctl restart vx27webdaq`, `sudo journalctl -u vx27webdaq`. Remove everything: `sudo systemctl disable --now vx27webdaq; sudo rm -rf /opt/Vx27webDAQ /usr/local/bin/vx27webdaq /etc/systemd/system/vx27webdaq.service`.
 
 To try the page from this folder without the service, as yourself: `./run_web.sh serve --port 8771` (your own settings and accounts; turn on the simulator on the Settings page to run without boards).
 
@@ -138,7 +140,7 @@ To try the page from this folder without the service, as yourself: `./run_web.sh
 
 ## Versions and git
 
-vMAJOR.MINOR.PATCH (on the page, top left; in `alab-daq-web --version`, `BUILD_INFO`, every `run.json` and every data file's header). Every change adds 1 to PATCH; MINOR and MAJOR change only when you choose so. Each version is one commit with the tag `vX.Y.Z`, and [CHANGELOG.md](CHANGELOG.md) says what changed. `version.sh` never pushes: `git push origin main --tags` sends the commits and tags to GitHub when you choose. `./version.sh` shows the version; `./version.sh minor -m "..."`, `./version.sh major -m "..."`, `./version.sh commit` (after changing the number in `src/alab_daq/__init__.py` by hand).
+vMAJOR.MINOR.PATCH (on the page, top left; in `vx27webdaq --version`, `BUILD_INFO`, every `run.json` and every data file's header). Every change adds 1 to PATCH; MINOR and MAJOR change only when you choose so. Each version is one commit with the tag `vX.Y.Z`, and [CHANGELOG.md](CHANGELOG.md) says what changed. `version.sh` never pushes: `git push origin main --tags` sends the commits and tags to GitHub when you choose. `./version.sh` shows the version; `./version.sh minor -m "..."`, `./version.sh major -m "..."`, `./version.sh commit` (after changing the number in `src/vx27webdaq/__init__.py` by hand).
 
 **Only the code, the scripts and their documents are in git**, never data: `.gitignore` keeps out the Python environment, the downloaded packages, the CAEN libraries, the test files, and every data file wherever it lands (`*.raw`, `*.root`, `*.evt`, `*.log`, `data/`, `runs/`, run records, configurations saved into this folder), and `./run_tests.sh` fails if git tracks anything else or a file over 200 kB. `git status --short --ignored` shows what is kept out.
 
@@ -150,7 +152,7 @@ The server listens on 127.0.0.1 only and answers only to local addresses, so it 
 
 ```bash
 ./run_tests.sh                                # this source folder (about a minute)
-./run_tests.sh --build /opt/ALAB_DAQ_WEB      # a build
+./run_tests.sh --build /opt/Vx27webDAQ      # a build
 ```
 
 They need no browser and no hardware (simulated boards). Everything they write stays in `.test_tmp/`.
@@ -161,23 +163,23 @@ They need no browser and no hardware (simulated boards). Everything they write s
 |---|---|
 | `setup.sh`, `caen_libs.sh`, `build.sh`, `run_web.sh`, `run_tests.sh` | setup, the CAEN libraries, build and service, start (or the account commands), tests |
 | `version.sh`, `CHANGELOG.md` | the version number and what changed in each version |
-| `src/alab_daq/core/` | no web: `rawdata.py` (the data format), `config.py` (the configuration, its check, and every board's parameters: the sync recipe and the trigger setups), `models.py`, `rootconv.py` |
-| `src/alab_daq/daq/` | the DAQ program: `engine.py` (one run of all boards), `boards.py` (a board through CAEN FELib), `sim.py` (the simulated boards) |
-| `src/alab_daq/web/` | the server: accounts, the run, the board check, ROOT conversion, data files, the JSON interface and live events |
-| `src/alab_daq/web/static/` | the page (HTML, CSS, JavaScript modules); `i18n/zh.json` the Chinese texts; `vendor/uplot` the plot library (uPlot, MIT) |
+| `src/vx27webdaq/core/` | no web: `rawdata.py` (the data format), `config.py` (the configuration, its check, and every board's parameters: the sync recipe and the trigger setups), `models.py`, `rootconv.py` |
+| `src/vx27webdaq/daq/` | the DAQ program: `engine.py` (one run of all boards), `boards.py` (a board through CAEN FELib), `sim.py` (the simulated boards) |
+| `src/vx27webdaq/web/` | the server: accounts, the run, the board check, ROOT conversion, data files, the JSON interface and live events |
+| `src/vx27webdaq/web/static/` | the page (HTML, CSS, JavaScript modules); `i18n/zh.json` the Chinese texts; `vendor/uplot` the plot library (uPlot, MIT) |
 | `tests/` | automatic tests |
-| `wheels/`, `ALAB_ENV/`, `caen/` | made by `setup.sh` and `caen_libs.sh` (not in git) |
+| `wheels/`, `VX27_ENV/`, `caen/` | made by `setup.sh` and `caen_libs.sh` (not in git) |
 
-A new tool for the Tools page is one module in `src/alab_daq/web/static/js/tools/`, listed in `tools/index.js` (see the comment there), with its texts in `i18n/zh.json` (`./run_tests.sh` says which are missing).
+A new tool for the Tools page is one module in `src/vx27webdaq/web/static/js/tools/`, listed in `tools/index.js` (see the comment there), with its texts in `i18n/zh.json` (`./run_tests.sh` says which are missing).
 
 ## If something goes wrong
 
 | What you see | What to do |
 |---|---|
-| The page does not open | Is the ssh -L connection still open? Does the server run: `sudo systemctl status alab-daq-web`? |
+| The page does not open | Is the ssh -L connection still open? Does the server run: `sudo systemctl status vx27webdaq`? |
 | A board's row stays red after **Check boards** | Its error is in the Boards tool: the address, the cable or network (can the DAQ computer `ping` it? the boards are on 192.168.0.x), the board's power; `CAEN FELib cannot be loaded` means step 2 of the install |
 | "it has 32 channels; the configuration has 16" | **Use what the boards said** on the Configuration page (after Check boards), or set that board's channels |
-| "it runs the … firmware; ALAB DAQ needs the Scope firmware" | Load the Scope firmware (the one WaveDump2 uses) with CAEN's tools |
+| "it runs the … firmware; Vx27webDAQ needs the Scope firmware" | Load the Scope firmware (the one WaveDump2 uses) with CAEN's tools |
 | "the board refused /par/… " | The firmware does not know that parameter or value: see the board's own list in Tools → Boards, and correct it with an expert parameter (or tell the maintainer) |
 | "… sent no data in this run: it did not start" | In a chain: the CLK-IN cable of that board, and the order of the boards on the Configuration page (the first is the master) |
 | "no stop record within 10 s" | The end of that board's data may be missing; check its link |

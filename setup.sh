@@ -2,11 +2,11 @@
 # One-time setup of this source folder, as your normal user (no sudo). It makes:
 #   wheels/        the Python packages of requirements.lock, downloaded from https://pypi.org (never a mirror);
 #                  build.sh installs from these files only, so a build needs no network
-#   ALAB_ENV/  the Python environment for running (./run_web.sh) and testing (./run_tests.sh) here
+#   VX27_ENV/      the Python environment for running (./run_web.sh) and testing (./run_tests.sh) here
 # Safe to run again; it only adds what is missing.
 set -euo pipefail
 cd "$(dirname "$0")"
-venv=ALAB_ENV
+venv=VX27_ENV
 py="${PYTHON:-python3}"                        # another Python: PYTHON=python3.12 ./setup.sh
 if [ "$(id -u)" -eq 0 ]; then
     echo "Run setup.sh as your normal user, without sudo: the files of this folder should stay yours." >&2
@@ -14,7 +14,7 @@ if [ "$(id -u)" -eq 0 ]; then
 fi
 
 # an environment remembers the folder it was made in (activate, pip): make it again if this folder moved
-"$py" -c 'import sys; sys.exit(sys.version_info < (3, 11))' || { echo "ALAB DAQ needs Python 3.11 or newer, not $("$py" -V 2>&1) (Ubuntu 24.04 has 3.12; on 22.04 install python3.11 and run PYTHON=python3.11 ./setup.sh)" >&2; exit 1; }
+"$py" -c 'import sys; sys.exit(sys.version_info < (3, 11))' || { echo "Vx27webDAQ needs Python 3.11 or newer, not $("$py" -V 2>&1) (Ubuntu 24.04 has 3.12; on 22.04 install python3.11 and run PYTHON=python3.11 ./setup.sh)" >&2; exit 1; }
 "$py" -c 'import ensurepip' 2>/dev/null || { echo "Python's venv module is missing: on Ubuntu run  sudo apt install python3-venv" >&2; exit 1; }
 if [ -x "$venv/bin/python" ] && ! grep -qF "$PWD/$venv" "$venv/bin/activate"; then
     echo "$venv/ was made in another folder; making it again here"

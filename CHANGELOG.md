@@ -1,9 +1,13 @@
 # Changelog
 
-What changed in each version of ALAB DAQ. Write the notes of the next version under "Unreleased";
+What changed in each version of Vx27webDAQ (ALAB DAQ until v0.0.18). Write the notes of the next version under "Unreleased";
 `./version.sh patch|minor|major` (or `commit`) moves them under the new version.
 
 ## Unreleased
+
+## v0.0.19 (2026-11-09)
+
+- Renamed ALAB DAQ to Vx27webDAQ: the repository and folder (Vx27webDAQ), the Python package (vx27webdaq), the command and service (vx27webdaq), the build folder (/opt/Vx27webDAQ), the environment (VX27_ENV), the settings and state folders (vx27webdaq: the old alab_daq folders move there by themselves, and a saved CAEN library folder of the old build becomes the new build's). build.sh takes over the old service alab-daq-web (its account and port) and removes it. The data folder /NAS/ALAB_DAQ_DATA and the data files' formats (ALABRAW1, alab-daq-*) are unchanged, so every file stays readable. The build server's name is no longer in the README.
 
 ## v0.0.18 (2026-11-08)
 

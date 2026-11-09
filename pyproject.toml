@@ -3,19 +3,19 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "alab-daq"
-dynamic = ["version"]           # from src/alab_daq/__init__.py (see version.sh)
-description = "ALAB DAQ: a web page for multi-board data taking with CAEN V2730 / V2740 digitizers (Scope firmware, CAEN FELib): configuration, synchronized runs, live waveforms, ROOT, accounts"
+name = "vx27webdaq"
+dynamic = ["version"]           # from src/vx27webdaq/__init__.py (see version.sh)
+description = "Vx27webDAQ: a web page for multi-board data taking with CAEN V2730 / V2740 digitizers (Scope firmware, CAEN FELib): configuration, synchronized runs, live waveforms, ROOT, accounts"
 readme = "README.md"
 requires-python = ">=3.11"
 # the tested versions are pinned in requirements.lock (setup.sh and build.sh use that file)
 dependencies = ["numpy>=2.0", "caen-felib>=1.4", "uproot>=5.4", "awkward>=2.0", "aiohttp>=3.9"]
 
 [project.scripts]
-alab-daq-web = "alab_daq.web.cli:main"
+vx27webdaq = "vx27webdaq.web.cli:main"
 
 [tool.setuptools.dynamic]
-version = {attr = "alab_daq.__version__"}
+version = {attr = "vx27webdaq.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
