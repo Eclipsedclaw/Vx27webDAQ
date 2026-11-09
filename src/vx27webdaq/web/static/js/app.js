@@ -1,7 +1,7 @@
 // The page: one connection to the server's live events, the state they keep up to date, the top bar,
 // signing in and out, and the pages (#run, #config, ...).
 import { get, post } from "./api.js";
-import { loadLanguage, T, t } from "./i18n.js";
+import { LANGUAGES, loadLanguage, T, t } from "./i18n.js";
 import { append, chip, clear, dialog, fail, fmtDuration, h, icon, roleChip, setDefaultFolder, store, toast } from "./ui.js";
 import { configPage } from "./pages/config.js";
 import { runPage } from "./pages/run.js";
@@ -123,8 +123,7 @@ function renderTop() {
   }
   const lang = h("select.input", { "aria-label": t("Language"), style: "width:auto;height:30px",
                                     onchange: async () => { store("lang", lang.value); location.reload(); } },
-                 h("option", { value: "en", selected: (store("lang") || "en") === "en" }, "English"),
-                 h("option", { value: "zh", selected: store("lang") === "zh" }, "中文"));
+                 LANGUAGES.map(([v, name]) => h("option", { value: v, selected: (store("lang") || "en") === v }, name)));
   const dark = document.documentElement.getAttribute("data-theme") === "dark" ||
                (!document.documentElement.getAttribute("data-theme") && matchMedia("(prefers-color-scheme: dark)").matches);
   const themeBtn = h("button.btn.btn-ghost.btn-icon", { type: "button", title: dark ? t("Light theme") : t("Dark theme"),

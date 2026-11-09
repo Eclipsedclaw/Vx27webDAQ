@@ -16,5 +16,6 @@
     if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
     var l = localStorage.getItem("vx27.lang");
     if (l === "zh") document.documentElement.setAttribute("lang", "zh-CN");
+    else if (l === "ja") document.documentElement.setAttribute("lang", "ja");
   } catch (e) { /* storage may be off: the system theme then */ }
 })();

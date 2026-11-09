@@ -5,6 +5,10 @@ What changed in each version of Vx27webDAQ (ALAB DAQ until v0.0.18). Write the n
 
 ## Unreleased
 
+## v0.0.21 (2026-11-09)
+
+- Japanese (日本語): a third language beside English and 中文 (top bar and Settings → This browser); every text in i18n/ja.json, the page in Japanese fonts (kanji in their Japanese shapes); the tests check that both translations have every text and every {value}.
+
 ## v0.0.20 (2026-11-09)
 
 - Fixed: the page moved only some of the browser's old alab.* choices to vx27.* (adding keys may reorder localStorage: the keys are listed first now).

@@ -36,7 +36,7 @@ Passwords are set by an admin (Users page, or the command line below); each user
 | **Settings** | the server's settings (the CAEN library folder, with whether both libraries are found; the simulator and its options; folders; ROOT after the run) and this browser's theme, language and layout |
 | **Users** | (admins) the accounts, whether guests may look in, and the activity log |
 
-Every page works in light and dark and in English and 中文; the dividers can be dragged.
+Every page works in light and dark and in English, 中文 and 日本語; the dividers can be dragged.
 
 ## How a run works
 
@@ -168,11 +168,11 @@ They need no browser and no hardware (simulated boards). Everything they write s
 | `src/vx27webdaq/core/` | no web: `rawdata.py` (the data format), `config.py` (the configuration, its check, and every board's parameters: the sync recipe and the trigger setups), `models.py`, `rootconv.py` |
 | `src/vx27webdaq/daq/` | the DAQ program: `engine.py` (one run of all boards), `boards.py` (a board through CAEN FELib), `sim.py` (the simulated boards) |
 | `src/vx27webdaq/web/` | the server: accounts, the run, the board check, ROOT conversion, data files, the JSON interface and live events |
-| `src/vx27webdaq/web/static/` | the page (HTML, CSS, JavaScript modules); `i18n/zh.json` the Chinese texts; `vendor/uplot` the plot library (uPlot, MIT) |
+| `src/vx27webdaq/web/static/` | the page (HTML, CSS, JavaScript modules); `i18n/zh.json` the Chinese and `i18n/ja.json` the Japanese texts; `vendor/uplot` the plot library (uPlot, MIT) |
 | `tests/` | automatic tests |
 | `wheels/`, `VX27_ENV/`, `caen/` | made by `setup.sh` and `caen_libs.sh` (not in git) |
 
-A new tool for the Tools page is one module in `src/vx27webdaq/web/static/js/tools/`, listed in `tools/index.js` (see the comment there), with its texts in `i18n/zh.json` (`./run_tests.sh` says which are missing).
+A new tool for the Tools page is one module in `src/vx27webdaq/web/static/js/tools/`, listed in `tools/index.js` (see the comment there), with its texts in `i18n/zh.json` and `i18n/ja.json` (`./run_tests.sh` says which are missing).
 
 ## If something goes wrong
 

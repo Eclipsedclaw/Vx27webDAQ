@@ -1,7 +1,7 @@
 // Settings page: the server's settings (operators change them, everyone can read them), this browser's
 // choices (theme, language, layout), and your account.
 import { put } from "../api.js";
-import { T, t } from "../i18n.js";
+import { T, t, LANGUAGES } from "../i18n.js";
 import { CONF_FILES, chip, choosePath, clear, clearLayout, fail, h, icon, roleChip, segmented, store, toast, toggle } from "../ui.js";
 
 const FIELDS = [
@@ -104,7 +104,7 @@ export function settingsPage(root, app) {
                             else { document.documentElement.setAttribute("data-theme", v); store("theme", v); }
                             location.reload();
                           }, { label: t("theme") });
-  const lang = segmented([["en", "English"], ["zh", "中文"]], store("lang") || "en", (v) => { store("lang", v); location.reload(); },
+  const lang = segmented(LANGUAGES, store("lang") || "en", (v) => { store("lang", v); location.reload(); },
                          { label: t("language") });
   page.appendChild(h("div.card",
     h("div.card-head", h("h2.card-title", t("This browser")), h("span.card-sub", t("kept in this browser only"))),
