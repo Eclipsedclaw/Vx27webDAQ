@@ -485,8 +485,8 @@ class SimBoard:
         c = name.lower()
         if c not in COMMANDS:
             raise BoardError(f"command {name}: not known")
-        now = self.crate.now()
         with self.crate.lock:
+            now = self.crate.now()          # under the lock: no reader produces past the moment of a stop
             if c == "reset":
                 self.reset()
             elif c == "armacquisition":

@@ -269,6 +269,22 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual((m.channels, m.adc_max, m.sample_ns), (32, 16383, 2.0))
 
 
+class SimulatorClockTests(unittest.TestCase):
+    def test_commands_read_the_clock_under_the_lock(self):
+        """A command takes its time under the crate lock. Taken before, a reader holding the lock could produce
+        events past the moment of a stop that the other boards then lack (the flaky logic_or test: one board with
+        one trigger more)."""
+        from vx27webdaq.daq.sim import Crate
+        crate = Crate("--rate 10", "none", {"b0": "V2740"}, {"b0": 4})
+        board = crate.open("dig2://sim", "b0")
+        owned, real = [], crate.now
+        crate.now = lambda: (owned.append(crate.lock._is_owned()), real())[1]
+        for name in ("Reset", "SwStopAcquisition", "SendSwTrigger", "DisarmAcquisition"):
+            board.cmd(name)
+        self.assertTrue(owned)
+        self.assertTrue(all(owned), owned)
+
+
 class GeneratorTests(unittest.TestCase):
     def test_generator(self):
         """The simulator's pulse generator: regular hits; a V2730 has a fast negative pulse on every channel at the
