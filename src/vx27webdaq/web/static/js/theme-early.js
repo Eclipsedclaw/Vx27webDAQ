@@ -2,8 +2,10 @@
 (function () {
   try {
     // what this browser kept under the old name (ALAB DAQ, until v0.0.18: alab.*) moves to vx27.*, once
-    for (var i = localStorage.length - 1; i >= 0; i--) {
-      var k = localStorage.key(i);
+    var old = [];                         // listed first: adding keys may reorder localStorage
+    for (var i = 0; i < localStorage.length; i++) old.push(localStorage.key(i));
+    for (var j = 0; j < old.length; j++) {
+      var k = old[j];
       if (k && k.indexOf("alab.") === 0) {
         var n = "vx27." + k.slice(5);
         if (localStorage.getItem(n) === null) localStorage.setItem(n, localStorage.getItem(k));
