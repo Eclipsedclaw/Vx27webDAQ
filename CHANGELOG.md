@@ -5,6 +5,10 @@ What changed in each version of Vx27webDAQ (ALAB DAQ until v0.0.18). Write the n
 
 ## Unreleased
 
+## v0.0.22 (2026-11-09)
+
+- A short README for the lab's users (open the page, a run in five steps, the pages, where the data go, install, what to do when something goes wrong); the details moved next to what they describe: INSTALL.md (install, update, upgrading, versions and git, the folders), src/vx27webdaq/web/README.md (every page and control, roles, safety), src/vx27webdaq/daq/README.md (how a run works, the trigger setups, the lab's boards and the first run with them, the simulator), src/vx27webdaq/core/README.md (the data files and their formats), tests/README.md (the tests and what is verified). build.sh copies INSTALL.md into the build too.
+
 ## v0.0.21 (2026-11-09)
 
 - Japanese (日本語): a third language beside English and 中文 (top bar and Settings → This browser); every text in i18n/ja.json, the page in Japanese fonts (kanji in their Japanese shapes); the tests check that both translations have every text and every {value}.
