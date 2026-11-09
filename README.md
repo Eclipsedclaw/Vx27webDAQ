@@ -1,10 +1,22 @@
 # Vx27webDAQ
 
-A web page for multi-board data taking with CAEN Digitizer 2.0 boards (**VX2730**, **VX2740**, also V2745) running the **Scope firmware** (the one WaveDump2 uses). It configures the boards, runs them synchronized on one clock, shows the run live, keeps every board's data losslessly and converts them to ROOT. One server runs on the DAQ computer; everyone opens it in their own browser.
+A web page for multi-board data taking with CAEN Digitizer 2.0 boards (**VX2730**, **VX2740**, also V2745) running the **Scope firmware** (the one WaveDump2 uses). It configures the boards, runs them synchronized on one clock, shows the run live, keeps every board's data losslessly and converts them to ROOT. One server runs on the DAQ computer; everyone opens it in their own browser. You can also run it locally to use it directly. The goal for this development is to have a tool that can completely function as wavedump2 and more!
 <img width="2555" height="903" alt="Screenshot 2026-11-09 at 4 51 18 PM" src="https://github.com/user-attachments/assets/d7cf4806-adbd-4b4b-8e61-5a6223f71e78" />
 
 
-**State (v0.0.0, 2026-11-07):** complete and tested with simulated boards; **not yet tried on real boards** (none was reachable from the computer where it was built). See [What is verified](tests/README.md#what-is-verified-and-what-is-not).
+## To use it, Install and update (on the DAQ computer)
+
+```bash
+git clone git@github.com:Eclipsedclaw/Vx27webDAQ.git && cd Vx27webDAQ
+./setup.sh                                          # once, as yourself: packages and Python environment
+./caen_libs.sh                                      # once: the CAEN libraries (only the simulator runs without them)
+sudo ./build.sh --service-user ACCOUNT --admin NAME # the first build: /opt/Vx27webDAQ + the service vx27webdaq
+git pull && sudo ./build.sh                         # every update (a run that is going goes on)
+```
+
+On Ubuntu 22.04 put `PYTHON=/usr/bin/python3.11` before `./setup.sh` and `./build.sh`. Accounts: `sudo -u ACCOUNT vx27webdaq user add NAME --role operator`. Everything else (requirements, the service, upgrading from ALAB DAQ, versions and git): [INSTALL.md](INSTALL.md).
+
+**State (v0.1.22, 2026-11-09):** complete and tested with simulated boards; **not yet tried on real boards** (none was reachable from the computer where it was built). See [What is verified](tests/README.md#what-is-verified-and-what-is-not).
 
 ## Open the page
 
@@ -54,18 +66,6 @@ Every control in detail: [src/vx27webdaq/web/README.md](src/vx27webdaq/web/READM
 | The configuration opened first | `/NAS/ALAB_DAQ_DATA/alab_daq_test.json` |
 
 The file formats: [src/vx27webdaq/core/README.md](src/vx27webdaq/core/README.md).
-
-## Install and update (on the DAQ computer)
-
-```bash
-git clone git@github.com:Eclipsedclaw/Vx27webDAQ.git && cd Vx27webDAQ
-./setup.sh                                          # once, as yourself: packages and Python environment
-./caen_libs.sh                                      # once: the CAEN libraries (only the simulator runs without them)
-sudo ./build.sh --service-user ACCOUNT --admin NAME # the first build: /opt/Vx27webDAQ + the service vx27webdaq
-git pull && sudo ./build.sh                         # every update (a run that is going goes on)
-```
-
-On Ubuntu 22.04 put `PYTHON=/usr/bin/python3.11` before `./setup.sh` and `./build.sh`. Accounts: `sudo -u ACCOUNT vx27webdaq user add NAME --role operator`. Everything else (requirements, the service, upgrading from ALAB DAQ, versions and git): [INSTALL.md](INSTALL.md).
 
 ## If something goes wrong
 
