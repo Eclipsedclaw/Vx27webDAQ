@@ -774,7 +774,7 @@ class RepositoryTests(unittest.TestCase):
 
     ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     SUFFIXES = (".py", ".js", ".css", ".html", ".svg", ".sh", ".md", ".toml", ".lock", ".txt")
-    OTHERS = {".gitignore", "src/vx27webdaq/web/static/i18n/zh.json", "src/vx27webdaq/web/static/vendor/uplot/LICENSE"}
+    OTHERS = {".gitignore", "src/vx27webdaq/web/static/i18n/zh.json", "src/vx27webdaq/web/static/i18n/ja.json", "src/vx27webdaq/web/static/vendor/uplot/LICENSE"}
 
     def git(self, *args, stdin=None):
         return subprocess.run(["git", "-C", self.ROOT, "--no-optional-locks", *args], input=stdin,

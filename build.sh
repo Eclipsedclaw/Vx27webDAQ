@@ -150,7 +150,7 @@ mkdir "$dest/src"
 cp -R "$src/src/vx27webdaq" "$dest/src/"
 find "$dest/src" -name __pycache__ -prune -exec rm -rf {} +
 "$py" -m compileall -q "$dest/src" >/dev/null
-cp "$src/run_web.sh" "$src/README.md" "$src/CHANGELOG.md" "$src/requirements.lock" "$dest/"
+cp "$src/run_web.sh" "$src/README.md" "$src/INSTALL.md" "$src/CHANGELOG.md" "$src/requirements.lock" "$dest/"
 if [ -f "$src/caen/lib/libCAEN_FELib.so" ] && [ -f "$src/caen/lib/libCAEN_Dig2.so" ]; then
     mkdir -p "$dest/caen"
     cp -a "$src/caen/lib" "$dest/caen/"

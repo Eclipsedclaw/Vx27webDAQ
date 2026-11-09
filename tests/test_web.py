@@ -701,12 +701,15 @@ class PageTests(WebTestCase):
                 imports.add(os.path.normpath(os.path.join(os.path.dirname(path), m)))
         self.assertEqual(sorted(p for p in imports if not os.path.isfile(p)), [])      # every module exists
 
-    def test_chinese_texts(self):
-        """Every text of the page that goes through t() or is marked T() has a Chinese translation, and so has
+    def test_translated_texts(self):
+        """Every text of the page that goes through t() or is marked T() has a Chinese and a Japanese translation
+        with the same {values}, and so has
         every word the server sends for the page to show (states, statuses, roles, the parameters' reasons)."""
         js = "".join(open(p, encoding="utf-8").read() for p in glob.glob(str(STATIC / "js" / "**" / "*.js"), recursive=True))
-        with open(STATIC / "i18n" / "zh.json", encoding="utf-8") as f:
-            zh = json.load(f)
+        langs = {}
+        for name in ("zh", "ja"):                                       # Chinese and Japanese
+            with open(STATIC / "i18n" / f"{name}.json", encoding="utf-8") as f:
+                langs[name] = json.load(f)
         used = {text.replace("\\'", "'").replace('\\"', '"')
                 for _, text in re.findall(r"""\b[tT]\(\s*(["'])((?:\\.|(?!\1).)*)\1""", js)}
         from vx27webdaq.web.accounts import ROLES
@@ -742,10 +745,14 @@ class PageTests(WebTestCase):
         three = C.default_config()
         three.boards.append(C.Board("b2", "dig2://x", "V2740", channels=C.channels_for("V2740")))
         used |= {s.why for s in C.plan(three, 1) if s.why}
-        missing = sorted(text for text in used if text not in zh)
-        self.assertEqual(missing, [])
-        unused = sorted(k for k in zh if k not in used)
-        self.assertLess(len(unused), 40, unused)                         # old texts do not pile up
+        holes = re.compile(r"\{(\w+)\}")
+        for name, texts in langs.items():
+            missing = sorted(text for text in used if text not in texts)
+            self.assertEqual(missing, [], name)
+            unused = sorted(k for k in texts if k not in used)
+            self.assertLess(len(unused), 40, (name, unused))             # old texts do not pile up
+            wrong = [k for k, v in texts.items() if sorted(holes.findall(k)) != sorted(holes.findall(v))]
+            self.assertEqual(wrong, [], name)                            # every {value} in its place
 
 
 if __name__ == "__main__":
