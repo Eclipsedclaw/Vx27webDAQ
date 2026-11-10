@@ -32,6 +32,11 @@ function planValues(plan) {
   return v;
 }
 
+// a sample rate in MS/s with the decimals its size needs: 500, 125, 62.5, 31.25, 7.813, 0.977
+function fmtMsps(v) {
+  return v.toLocaleString("en-US", { maximumFractionDigits: v >= 100 ? 0 : v >= 10 ? 2 : 3 });
+}
+
 function sourceText(src) {
   return (src || "").split("|").map((x) => t(SOURCE_TEXT[x] || x)).join(" + ");
 }
@@ -84,7 +89,7 @@ export function setupView(app) {
       g.append(s("rect", { x: boxX, y, width: boxW, height: BOX_H, rx: 10, class: `sv-box${master ? " sv-master" : ""}${L && L.state === "error" ? " sv-bad" : ""}` }));
       g.append(s("text", { x: boxX + 12, y: y + 20, class: "sv-t sv-name" }, `${b.name} · ${b.model}`),
                s("text", { x: boxX + boxW - 12, y: y + 20, "text-anchor": "end", class: `sv-t sv-role${master ? " sv-accent" : ""}` }, t(ROLE[role] || role)));
-      const facts = `${fmtInt(info.channels)} ${t("ch")} · ${ns ? fmtNum(1000 / ns, 0) : "?"} MS/s · ${t("window {w} µs, {p} µs before", { w: fmtNum(win / 1000, 3), p: fmtNum(pre / 1000, 3) })}`;
+      const facts = `${fmtInt(info.channels)} ${t("ch")} · ${ns ? fmtMsps(1000 / ns) : "?"} MS/s · ${t("window {w} µs, {p} µs before", { w: fmtNum(win / 1000, 3), p: fmtNum(pre / 1000, 3) })}`;
       g.append(s("text", { x: boxX + 12, y: y + 39, class: "sv-t sv-dim" }, fit(facts, boxW - 24)));
       const start = v.StartSource ? (v.StartSource === "SWcmd" ? t("the DAQ") : v.StartSource === "EncodedClkIn" ? t("the run signal on CLK-IN") : v.StartSource) : "";
       const trig = `${t("trigger")}: ${sourceText(v.AcqTriggerSource)}` + (start ? ` · ${t("start")}: ${start}` : "")
@@ -94,13 +99,13 @@ export function setupView(app) {
       if (L) {
         const temps = Object.entries(L.monitors || {}).filter(([kk, vv]) => kk.startsWith("temp") && typeof vv === "number").map(([, vv]) => vv);
         const off = match && match.offsets ? match.offsets[b.name] : null;
-        state = [t(L.state || "?"), `${fmtInt(L.events)} ${t("events")}`, L.rate ? `${fmtNum(L.rate, 1)} Hz` : null,
+        state = [t(L.state || "stopped"), `${fmtInt(L.events)} ${t("events")}`, L.rate ? `${fmtNum(L.rate, 1)} Hz` : null,
                  temps.length ? `${fmtNum(Math.max(...temps), 0)} °C` : null,
                  L.error_flags ? t("error flags 0x{f}", { f: Number(L.error_flags).toString(16) }) : null,
                  off ? t("Δt {d} ns", { d: `${off.mean_ns >= 0 ? "+" : "−"}${fmtNum(Math.abs(off.mean_ns), 0)}` }) : (match && match.reference === b.name ? t("time reference") : null)]
           .filter(Boolean).join(" · ");
       }
-      g.append(s("circle", { cx: boxX + 16, cy: y + 74, r: 4, class: `sv-led sv-led-${L ? L.state : "none"}` }),
+      g.append(s("circle", { cx: boxX + 16, cy: y + 74, r: 4, class: `sv-led sv-led-${L ? L.state || "stopped" : "none"}` }),
                s("text", { x: boxX + 26, y: y + 78, class: "sv-t sv-dim" }, fit(state, boxW - 40)));
       svg.append(g);
       // the cables to the next board

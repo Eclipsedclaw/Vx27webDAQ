@@ -2,7 +2,7 @@
 // board) or for a whole .raw or ROOT file (from up to 200 events spread over it): the baseline (mean of the first
 // 16 samples), the noise (σ of those samples) or the peak (the largest distance from the baseline). A scale legend
 // says what the colors mean, every cell shows its value, and hovering a cell shows all three.
-import { get } from "../api.js";
+import { SLOW_MS, get } from "../api.js";
 import { T, t } from "../i18n.js";
 import { basename, chooseFile, clear, fail, fmtInt, fmtNum, h, hideTip, icon, segmented, setText, showTip, store } from "../ui.js";
 
@@ -118,13 +118,21 @@ export default {
       return td;
     }
 
+    // choice counts the choices (Live, a file): an answer for an earlier one is dropped, so live numbers never
+    // land on a file's map; liveAsk keeps only the newest live answer
+    let choice = 0, liveAsk = 0;
     async function loadLive() {
-      try { data = await get("/api/live/overview"); } catch (err) { data = null; }
-      if (source === "live") render();
+      const my = choice, n = ++liveAsk;
+      let d = null;
+      try { d = await get("/api/live/overview"); } catch (err) { d = null; }
+      if (my !== choice || n !== liveAsk || source !== "live") return;
+      data = d;
+      render();
     }
 
     async function setSource(v) {
       if (v === "file" && !file) { await pickFile(); return; }
+      choice += 1;
       source = v;
       store("overview.source", v);
       if (v === "file") await openFile(file); else loadLive();
@@ -136,20 +144,25 @@ export default {
     }
 
     async function openFile(path) {
+      const my = ++choice;
       setText(sub, t("Reading…"));
+      let d;
       try {
-        data = await get("/api/files/overview", { path });
-        file = path;
-        source = "file";
-        store("overview.file", path);
-        store("overview.source", "file");
+        d = await get("/api/files/overview", { path }, { timeout: SLOW_MS });
       } catch (err) {
+        if (my !== choice) return;
         fail(err);
         source = "live";
         store("overview.source", "live");
         loadLive();
         return;
       }
+      if (my !== choice) return;               // Live, or another file, was chosen while this one was read
+      data = d;
+      file = path;
+      source = "file";
+      store("overview.file", path);
+      store("overview.source", "file");
       render();
     }
 

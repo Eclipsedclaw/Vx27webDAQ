@@ -2,7 +2,7 @@
 // choices (theme, language, layout), and your account.
 import { put } from "../api.js";
 import { T, t, LANGUAGES } from "../i18n.js";
-import { CONF_FILES, chip, choosePath, clear, clearLayout, fail, h, icon, roleChip, segmented, store, toast, toggle } from "../ui.js";
+import { CONF_FILES, chip, choosePath, clear, clearLayout, confirmDialog, fail, h, icon, roleChip, segmented, store, toast, toggle } from "../ui.js";
 
 const FIELDS = [
   ["config_file", T("configuration opened when the server starts with nothing being edited"), "file"],
@@ -26,13 +26,17 @@ export function settingsPage(root, app) {
   const changes = {};
   const saveBtn = h("button.btn.btn-primary", { type: "button", disabled: true, onclick: save }, icon("check"), t("Save settings"));
   const grid = h("div.form-grid");
+  const fields = {};          // each setting's input of now: the form is drawn again when another operator saves
+  const lines = (el) => el.value.split("\n").map((x) => x.trim()).filter(Boolean);
+  const adminOnly = new Set(app.state.settings.admin_only || []);   // e.g. the CAEN library folder: its code runs as the server
 
   function control(key, kind) {
     const v = values[key];
+    const off = !can || (adminOnly.has(key) && !app.can("admin"));
     const mark = (val) => { changes[key] = val; saveBtn.disabled = false; };
     if (kind === "choice") {
       const names = { "": t("random hits (the simulator options)"), staircase: t("pulse generator: VX2730 a fast negative pulse on every channel at once; VX2740 a slow positive pulse (5 µs rise, 1 ms decay), channel k at k × 5 µs") };
-      const el = h("select.input", { disabled: !can, onchange: () => mark(el.value) },
+      const el = h("select.input", { disabled: off, onchange: () => mark(el.value) },
                    ((app.state.settings.choices || {})[key] || []).map((c) => h("option", { value: c }, names[c] || c)));
       el.value = String(v ?? "");
       return el;
@@ -41,28 +45,31 @@ export function settingsPage(root, app) {
       const label = { use_simulator: t("use simulated boards instead of the real ones (no hardware)"),
                       build_events: t("also RUN_built.root: every board's event per trigger, in one file") }[key]
                     || t("after every run, its .raw files become .root files");
-      return toggle(label, Boolean(v), (on) => mark(on), { disabled: !can });
+      return toggle(label, Boolean(v), (on) => mark(on), { disabled: off });
     }
     if (kind === "folders") {
-      const el = h("textarea.input", { rows: "3", disabled: !can, style: "width:min(640px,100%)", oninput: () => mark(el.value) });
+      const el = h("textarea.input", { rows: "3", disabled: off, style: "width:min(640px,100%)", oninput: () => mark(el.value) });
       el.value = (v || []).join("\n");
-      const add = h("button.btn.btn-sm", { type: "button", disabled: !can, onclick: async () => {
-        const lines = el.value.split("\n").map((x) => x.trim()).filter(Boolean);
-        const p = await choosePath({ title: t("Add a data folder"), want: "folder", start: lines[lines.length - 1] || "" });
-        if (p && !lines.includes(p)) { el.value = [...lines, p].join("\n"); mark(el.value); }
+      fields[key] = el;
+      const add = h("button.btn.btn-sm", { type: "button", disabled: off, onclick: async () => {
+        const before = lines(fields[key] || el);
+        const p = await choosePath({ title: t("Add a data folder"), want: "folder", start: before[before.length - 1] || "" });
+        const now = fields[key] || el, list = lines(now);        // the field there is now, with what it has now
+        if (p && !list.includes(p)) { now.value = [...list, p].join("\n"); mark(now.value); }
       } }, icon("plus"), t("Add folder…"));
       return [el, add];
     }
-    const el = h("input.input", { value: String(v ?? ""), disabled: !can, type: kind === "int" ? "number" : "text",
+    const el = h("input.input", { value: String(v ?? ""), disabled: off, type: kind === "int" ? "number" : "text",
                                   style: kind === "int" ? "width:120px" : "width:min(640px,100%)",
                                   oninput: () => mark(kind === "int" ? Number(el.value) : el.value),
                                   placeholder: key === "runs_dir" ? t("empty = {path}", { path: app.state.settings.runs_folder }) : "" });
     if (kind !== "int" && kind !== "text") el.classList.add("mono");
+    fields[key] = el;
     if (kind !== "file" && kind !== "folder") return el;
-    const pick = h("button.btn.btn-sm", { type: "button", disabled: !can, onclick: async () => {
-      const start = el.value.trim() || (key === "runs_dir" ? app.state.settings.runs_folder : "");
+    const pick = h("button.btn.btn-sm", { type: "button", disabled: off, onclick: async () => {
+      const start = (fields[key] || el).value.trim() || (key === "runs_dir" ? app.state.settings.runs_folder : "");
       const p = await choosePath({ title: t(FIELDS.find((f) => f[0] === key)[1]), want: kind, filters: PICK[key] || null, start });
-      if (p) { el.value = p; mark(p); }
+      if (p) { (fields[key] || el).value = p; mark(p); }     // into the field there is now
     } }, icon("folder"), t("Choose…"));
     return [el, pick];
   }
@@ -73,8 +80,10 @@ export function settingsPage(root, app) {
     if (key === "simulator_options") grid.append(h("span.hint.hint-cell", t("--rate HZ: hits per second; --share P: the part of the channels a hit reaches; --amplitude COUNTS; --noise SIGMA; --seed N; --spacing-us US, --rise-us US, --decay-us US: the VX2740 pulses of the generator (5, 5, 1000 µs); --fail open:NAME, param:NAME:PARAM, read:NAME:N, nostop:NAME or unarmed:NAME imitates a failure of board NAME")));
     if (key === "simulator_pulses") grid.append(h("span.hint.hint-cell", t("the pulse generator: every channel of every board gets a full pulse at each hit (--rate a second, at regular times), negative on a VX2730 and positive on a VX2740, so the waveforms are easy to read; the boards line up in the combined view")));
     if (key === "caen_lib_dir") {
-      const libs = app.state.settings.caen_libs || {};
+      const libs = app.state.settings.caen_libs || {}, problem = app.state.settings.caen_lib_problem;
       grid.append(h("span.hint.hint-cell", Object.entries(libs).map(([name, ok]) => [chip(`${name} ${ok ? t("found") : t("missing")}`, ok ? "good" : "warning", ok ? "check" : "alert"), " "]),
+                    problem ? [chip(t("not used: {why}", { why: problem }), "warning", "alert"), " "] : "",
+                    adminOnly.has(key) && can && !app.can("admin") ? `${t("Only admins change this.")} ` : "",
                     Object.values(libs).every(Boolean) ? "" : t("Without them only the simulator runs: build them with ./caen_libs.sh (from CAEN's open-source code, no sudo), or install CAEN FELib and CAEN Dig2 and give their folder.")));
     }
   }
@@ -98,13 +107,22 @@ export function settingsPage(root, app) {
   }
 
   // ---- this browser ----
+  // another theme or language reloads the page: server settings changed above and not saved would go with it
+  async function reloadOk(seg, old) {
+    if (!Object.keys(changes).length) return true;
+    if (await confirmDialog(t("Unsaved changes"), [t("The server settings have unsaved changes. Discard them?")], t("Discard"))) return true;
+    seg.set(old);
+    return false;
+  }
+  const themeWas = store("theme") || "system", langWas = store("lang") || "en";
   const theme = segmented([["system", t("System")], ["light", t("light")], ["dark", t("dark")]],
-                          store("theme") || "system", (v) => {
+                          themeWas, async (v) => {
+                            if (!(await reloadOk(theme, themeWas))) return;
                             if (v === "system") { document.documentElement.removeAttribute("data-theme"); store("theme", null); }
                             else { document.documentElement.setAttribute("data-theme", v); store("theme", v); }
-                            location.reload();
+                            app.reload();
                           }, { label: t("theme") });
-  const lang = segmented(LANGUAGES, store("lang") || "en", (v) => { store("lang", v); location.reload(); },
+  const lang = segmented(LANGUAGES, langWas, async (v) => { if (!(await reloadOk(lang, langWas))) return; store("lang", v); app.reload(); },
                          { label: t("language") });
   page.appendChild(h("div.card",
     h("div.card-head", h("h2.card-title", t("This browser")), h("span.card-sub", t("kept in this browser only"))),
@@ -129,6 +147,9 @@ export function settingsPage(root, app) {
         clear(grid);
         for (const [key, label, kind] of FIELDS) { grid.append(h("span.label", t(label)), h("div.row.nowrap", control(key, kind))); hints(key); }
       }
+    },
+    unmount() {                                  // leaving the page: what was changed and not saved is gone, said so
+      if (Object.keys(changes).length) toast(t("Your changes to the server settings were not saved."), "error");
     },
   };
 }

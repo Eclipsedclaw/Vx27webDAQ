@@ -167,6 +167,18 @@ export function toast(message, kind = "info") {
 export function fail(err) { toast(err && err.message ? err.message : String(err), "error"); }
 
 // ---- dialogs ----
+// While a dialog is open the page behind it is inert (no clicks, no focus) and Tab goes round the dialog's own
+// controls; a dialog opened from a dialog has the keys until it closes.
+const openDialogs = [];
+const FOCUSABLE = "a[href], button, input, select, textarea, summary, [tabindex]:not([tabindex='-1'])";
+
+function pageInert(on) {
+  for (const id of ["main", "topbar"]) {
+    const el = document.getElementById(id);
+    if (el) el.inert = on;
+  }
+}
+
 // dialog({title, body, actions: [{label, kind, value, primary}]}) -> Promise of the chosen value (null: closed)
 export function dialog({ title, body, actions = [{ label: t("Close"), value: null }], wide = false, onOpen }) {
   return new Promise((resolve) => {
@@ -175,14 +187,29 @@ export function dialog({ title, body, actions = [{ label: t("Close"), value: nul
     const modal = h(`div.modal${wide ? ".wide" : ""}`, { role: "dialog", "aria-modal": "true", "aria-label": title },
                     h("div.modal-head", h("h2", title)), h("div.modal-body", body), foot);
     const backdrop = h("div.backdrop", { onmousedown: (e) => { if (e.target === backdrop) done(null); } }, modal);
+    let closed = false;
     function done(value) {
+      if (closed) return;
+      closed = true;
       backdrop.remove();
       document.removeEventListener("keydown", onKey, true);
+      openDialogs.splice(openDialogs.indexOf(modal), 1);
+      if (!openDialogs.length) pageInert(false);
       if (last && last.focus) last.focus();
       resolve(value);
     }
     function onKey(e) {
+      if (openDialogs[openDialogs.length - 1] !== modal) return;        // the dialog opened from this one has them
       if (e.key === "Escape") { e.stopPropagation(); done(null); }
+      else if (e.key === "Tab") keepFocus(e);
+    }
+    function keepFocus(e) {                                             // from the last control to the first, and back
+      const list = [...modal.querySelectorAll(FOCUSABLE)].filter((el) => !el.disabled && el.getClientRects().length);
+      if (!list.length) { e.preventDefault(); return; }
+      const first = list[0], end = list[list.length - 1], at = document.activeElement;
+      if (!modal.contains(at)) { e.preventDefault(); (e.shiftKey ? end : first).focus(); }
+      else if (e.shiftKey && at === first) { e.preventDefault(); end.focus(); }
+      else if (!e.shiftKey && at === end) { e.preventDefault(); first.focus(); }
     }
     for (const a of actions) {
       foot.appendChild(h(`button.btn${a.kind ? ".btn-" + a.kind : ""}`, {
@@ -194,6 +221,8 @@ export function dialog({ title, body, actions = [{ label: t("Close"), value: nul
       }, a.icon ? icon(a.icon) : null, a.label));
     }
     document.addEventListener("keydown", onKey, true);
+    openDialogs.push(modal);
+    pageInert(true);
     document.body.appendChild(backdrop);
     const first = modal.querySelector("input, select, textarea") || foot.querySelector(".btn-primary, .btn-danger, .btn");
     if (first) first.focus();
@@ -320,6 +349,7 @@ export async function chooseFile({ title, want = "file", kinds = ["root", "raw"]
       }
     }
     if (!rows.length || (rows.length === 1 && data.parent)) rows.push(h("li.muted", t("Nothing here")));
+    if (data.more_count) rows.push(h("li.muted", t("{n} more not shown", { n: data.more_count })));   // past the newest 5000
     clear(list, rows);
   }
   let finish = () => {};
@@ -411,6 +441,11 @@ export function choosePath({ title, want = "file", filters = null, start = "", n
 
   function enter(fn) { return (e) => { if (e.key === "Enter") { e.preventDefault(); fn(); } }; }
 
+  function folderOf(p) {                    // the folder of a path typed; a bare name ("test.json") is in the folder shown
+    const k = p.lastIndexOf("/");
+    return k < 0 ? folder : p.slice(0, k) || "/";
+  }
+
   function pick(li, path) {
     list.querySelectorAll("li.on").forEach((x) => x.classList.remove("on"));
     li.classList.add("on");
@@ -422,7 +457,7 @@ export function choosePath({ title, want = "file", filters = null, start = "", n
   function showState() {                    // save: does the name exist in the folder shown?
     let text = "";
     if (want === "save") {
-      const p = pathInput.value.trim(), dir = p.slice(0, p.lastIndexOf("/")) || "/", n = basename(p);
+      const p = pathInput.value.trim(), dir = folderOf(p), n = basename(p);
       const there = (dir === folder) && entries.find((e) => e.name === n);
       if (replace && replace === p) text = t("{name} exists: Save again to replace it", { name: n });
       else if (there && there.kind === "file") text = t("{name} exists and will be replaced", { name: n });
@@ -448,7 +483,7 @@ export function choosePath({ title, want = "file", filters = null, start = "", n
     }
     // save: into an existing folder; a name that exists is replaced only after a second Save
     if (p.endsWith("/")) { await load(p); return; }
-    const dir = p.slice(0, p.lastIndexOf("/")) || "/", n = basename(p);
+    const dir = folderOf(p), n = basename(p);
     if (dir !== folder && !(await load(dir))) return;                        // its folder must exist (shown now)
     pathInput.value = join(folder, n);
     const there = entries.find((e) => e.name === n);

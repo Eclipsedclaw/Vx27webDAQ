@@ -3,7 +3,7 @@
 // filter: the names and allowed values to use for the expert parameters of the Configuration page. The manual
 // controller (WaveDump2's) gets or sets one parameter of an idle board, or sends it a command (operators; a click
 // on a parameter fills it in). The next run resets every board and sets it from the configuration.
-import { get, post } from "../api.js";
+import { SLOW_MS, get, post } from "../api.js";
 import { T, t } from "../i18n.js";
 import { clear, fail, fmtBytes, fmtClock, fmtInt, fmtNum, h, icon, setText, store, toast } from "../ui.js";
 
@@ -49,10 +49,15 @@ export default {
                   h("label.row.nowrap", allCh, t("every channel (else channel 0 only)")), h("span.spacer"), treeInfo),
                 treeBox);
 
+    // a run or a sequence of runs (also between two of its runs) has the boards: the server refuses a check then
+    function busy() {
+      return Boolean((app.state.run && app.state.run.active) || (app.state.sequence && app.state.sequence.state === "running"));
+    }
+
     function showFacts() {
       const C = app.state.boards || {};
-      const active = app.state.run && app.state.run.active;
-      checkBtn.disabled = !app.can("control") || Boolean(C.running) || Boolean(active);
+      const active = busy();
+      checkBtn.disabled = !app.can("control") || Boolean(C.running) || active;
       checkBtn.title = !app.can("control") ? t("Operators check the boards") : active ? t("Not during a run: the Run page shows the boards") : "";
       setText(when, C.checked_at ? t("checked {time} by {who}", { time: fmtClock(C.checked_at), who: C.by }) + (C.simulator ? ` · ${t("simulated")}` : "") : t("not checked yet"));
       const rows = (C.results || []).map((r) => {
@@ -115,7 +120,7 @@ export default {
     }
 
     function showMc() {
-      const C = app.state.boards || {}, active = app.state.run && app.state.run.active;
+      const C = app.state.boards || {}, active = busy();
       const ok = app.can("control") && !active && !C.running && boardSel.value;
       for (const b of [mcGet, mcSet, mcCmd]) b.disabled = !ok;
       mcBox.title = !app.can("control") ? t("Operators use the manual controller") : active ? t("Not during a run: the DAQ program has the boards") : "";
@@ -127,7 +132,7 @@ export default {
       if (action === "set" && !mcValue.value.trim()) { mcValue.focus(); return; }
       setText(mcOut, t("asking {b}…", { b: boardSel.value }));
       try {
-        const r = await post("/api/boards/param", { board: boardSel.value, action, path, value: mcValue.value });
+        const r = await post("/api/boards/param", { board: boardSel.value, action, path, value: mcValue.value }, { timeout: SLOW_MS });
         const sim = r.simulator ? ` · ${t("simulated")}` : "";
         if (r.ok && action !== "cmd") { mcValue.value = String(r.value ?? ""); setText(mcOut, `${boardSel.value} ${r.path} = ${r.value}${sim}`); }
         else if (r.ok) setText(mcOut, t("{b}: command {c} sent", { b: boardSel.value, c: path }) + sim);
@@ -150,7 +155,7 @@ export default {
           showFacts();
           if (!before) loadTree();
         }
-        if (type === "run" || type === "config" || type === "boards") { showFacts(); showMc(); }
+        if (type === "run" || type === "config" || type === "boards" || type === "sequence") { showFacts(); showMc(); }
       },
     };
   },

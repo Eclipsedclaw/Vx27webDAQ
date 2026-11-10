@@ -380,7 +380,8 @@ export class WavePlot {
   }
 }
 
-// A plain x-y plot of one series: the FFT (MHz, dBFS) or the samples histogram (ADC code, entries; drawn as steps)
+// A plain x-y plot of one series: the FFT (MHz, dBFS) or the samples histogram (ADC code, entries; drawn as steps).
+// A drag zooms the x axis, and the zoom stays while the data are refreshed, until a double-click.
 export class XYPlot {
   constructor(el, { readout } = {}) {
     this.el = el;
@@ -388,6 +389,7 @@ export class XYPlot {
     this.opts = { xLabel: "", yLabel: "", stepped: false, xFmt: (v) => String(v), yFmt: (v) => String(v) };
     this.data = [[], []];
     this.sig = "";
+    this.zoomed = null;      // [x0, x1] after a drag
     this.ro = new ResizeObserver(() => this.fit());
     this.ro.observe(el);
   }
@@ -399,8 +401,8 @@ export class XYPlot {
       scales: { x: { time: false } },
       series: [{}, { stroke: accent, width: 1.25, fill: o.stepped ? alpha(accent, 0.15) : undefined, points: { show: false },
                      paths: o.stepped && uPlot.paths && uPlot.paths.stepped ? uPlot.paths.stepped({ align: 1 }) : undefined }],
-      cursor: { drag: { x: true, y: false }, points: { show: false } },
-      hooks: { setCursor: [(u) => self.moved(u)] },
+      cursor: { drag: { x: true, y: false, setScale: false }, points: { show: false }, bind: { dblclick: () => null } },
+      hooks: { setCursor: [(u) => self.moved(u)], setSelect: [(u) => self.selected(u)] },
     });
     opts.axes[0].label = o.xLabel;
     opts.axes[1].label = o.yLabel;
@@ -410,14 +412,40 @@ export class XYPlot {
     opts.axes[0].size = 40;
     opts.axes[1].size = 56;
     this.u = new uPlot(opts, this.data, this.el);
+    this.keepZoom();
     this.u.over.addEventListener("mouseleave", () => this.readout && setText(this.readout, ""));
+    this.u.over.addEventListener("dblclick", () => this.resetZoom());
+  }
+
+  selected(u) {
+    const s = u.select;
+    if (s.width < 4) return;
+    const x0 = u.posToVal(s.left, "x"), x1 = u.posToVal(s.left + s.width, "x");
+    u.setSelect({ left: 0, top: 0, width: 0, height: 0 }, false);
+    this.zoomed = [x0, x1];
+    this.keepZoom();
+  }
+
+  keepZoom() { if (this.zoomed && this.u) this.u.setScale("x", { min: this.zoomed[0], max: this.zoomed[1] }); }
+
+  resetZoom() {
+    if (!this.zoomed) return;
+    this.zoomed = null;
+    if (this.u) this.u.setData(this.data, true);
   }
 
   set(xs, ys, opts = {}) {
     this.opts = { ...this.opts, ...opts };
     this.data = [Array.from(xs), Array.from(ys)];
     const sig = JSON.stringify([this.opts.xLabel, this.opts.yLabel, this.opts.stepped]);
-    if (!this.u || sig !== this.sig) { this.sig = sig; this.build(); } else this.u.setData(this.data, true);
+    if (!this.u || sig !== this.sig) {
+      if (sig !== this.sig) this.zoomed = null;          // another kind of plot: another x axis
+      this.sig = sig;
+      this.build();
+    } else {
+      this.u.setData(this.data, true);
+      this.keepZoom();
+    }
   }
 
   moved(u) {

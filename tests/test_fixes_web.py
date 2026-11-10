@@ -1045,6 +1045,13 @@ class FakeRunTests(FixTestCase):
         a = self.fake_run()
         res = await (await self.client.get("/api/live/boards")).json()
         self.assertEqual((res["source"], res["run_dir"]), ("run", a.run_dir))
+        # J12: Tune… starts from the values the run has (changed during it), not those of the configuration edited now
+        a.cfg = C.from_dict(C.to_dict(a.cfg))
+        a.cfg.board("b0").channels[2].dc_offset, a.cfg.board("b0").channels[2].threshold = 33.5, 777
+        res = await (await self.client.get("/api/live/boards")).json()
+        b0 = res["boards"][0]
+        self.assertEqual((len(b0["dc_offset"]), len(b0["threshold"]), b0["dc_offset"][2], b0["threshold"][2]), (64, 64, 33.5, 777))
+        self.assertNotEqual(self.station.cfg.board("b0").channels[2].threshold, 777)
         self.station.runs.active = None
 
     def test_last_run_is_the_newest_folder(self):

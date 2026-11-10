@@ -1,5 +1,7 @@
 // Signal processing for the scope tools of the waveform panel (WaveDump2's plot types): the FFT of a waveform,
-// averaged over the newest N events, and the histogram of its sample values, filled event after event.
+// averaged over the newest N events, and the histogram of its sample values, filled event after event; and, as
+// the server does them (files.py), a range measured and a waveform thinned for a plot: for the mean of N events
+// and for the event kept at Pause, which exist only in the browser.
 
 export function nextPow2(n) {
   let p = 1;
@@ -62,7 +64,8 @@ export function spectrumDb(power, count, n, m, sampleNs, adcMax) {
   return { freq, db };
 }
 
-// the newest `size` arrays of the same length, and their sum (for an average)
+// the newest `size` arrays of the same length, and their sum (for an average). The arrays are kept as given:
+// Int32Array or Float32Array (4 bytes a value: 64 waveforms of 65536 samples are 16 MiB a channel); the sum is Float64
 export class Ring {
   constructor(size) { this.size = size; this.items = []; this.sum = null; }
   add(arr) {
@@ -109,6 +112,49 @@ export class SampleHistogram {
     const nb = Math.floor((hi - lo) / width) + 1, ys = new Array(nb).fill(0), xs = new Array(nb);
     for (const [v, c] of this.counts) ys[Math.floor((v - lo) / width)] += c;
     for (let b = 0; b < nb; b++) xs[b] = lo + b * width;
+    xs.push(lo + nb * width);           // where the last bin ends: a stepped line holds each value up to the next x
+    ys.push(0);
     return { xs, ys, width };
   }
+}
+
+// the samples x0 <= k < x1 of a waveform (files.measure): lowest, highest, mean, σ, the sample farthest from the
+// baseline (peak, signed, and where), the area against the baseline in ADC·ns, and the values at both edges
+export function measure(y, x0, x1, baseline, sampleNs) {
+  const a = Math.max(0, Math.trunc(x0)), b = Math.min(y.length, Math.trunc(x1));
+  if (b <= a) return { x0: a, x1: b, n: 0 };
+  let min = Infinity, max = -Infinity, sum = 0, far = -1, k = a;
+  for (let i = a; i < b; i++) {
+    const v = y[i], d = Math.abs(v - baseline);
+    if (v < min) min = v;
+    if (v > max) max = v;
+    sum += v;
+    if (d > far) { far = d; k = i; }                   // the first of equals, as numpy's argmax
+  }
+  const n = b - a, mean = sum / n;
+  let ss = 0;
+  for (let i = a; i < b; i++) ss += (y[i] - mean) ** 2;
+  return { x0: a, x1: b, n, min, max, mean, std: Math.sqrt(ss / n), peak: y[k] - baseline, peak_at: k,
+           area: (sum - n * baseline) * sampleNs, first: y[a], last: y[b - 1], baseline };
+}
+
+// the samples x0 … x1 of a waveform for a plot `bins` points wide (files.envelope): every sample when there are
+// few ("raw"), else per bin of `step` samples its lowest and highest, in the order they come (a spike shows)
+export function envelope(y, x0 = 0, x1 = null, bins = 800) {
+  const all = y.length;
+  x0 = Math.max(0, Math.min(Math.trunc(x0), all));
+  x1 = x1 === null || x1 === undefined ? all : Math.max(x0, Math.min(Math.trunc(x1), all));
+  bins = Math.max(16, Math.min(Math.trunc(bins), 4000));
+  if (x1 - x0 <= 2 * bins) return { mode: "raw", x0, step: 1, y: Array.from(y.slice(x0, x1)) };
+  const step = Math.ceil((x1 - x0) / bins), out = [];
+  for (let a = x0; a < x1; a += step) {
+    const b = Math.min(x1, a + step);
+    let lo = a, hi = a;
+    for (let i = a + 1; i < b; i++) {
+      if (y[i] < y[lo]) lo = i;
+      if (y[i] > y[hi]) hi = i;
+    }
+    if (lo <= hi) out.push(y[lo], y[hi]); else out.push(y[hi], y[lo]);
+  }
+  return { mode: "envelope", x0, step, y: out };
 }

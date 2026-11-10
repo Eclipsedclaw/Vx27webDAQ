@@ -3,7 +3,7 @@
 // counters, the dead time, each channel's self-trigger rate, and the error flags. Live (the run going, or the
 // last run) or from a data file (the housekeeping file of its board); one quantity at a time over the run time,
 // and every value of the newest reading.
-import { get } from "../api.js";
+import { SLOW_MS, get } from "../api.js";
 import { T, t } from "../i18n.js";
 import { basename, chooseFile, clear, fail, fmtInt, fmtNum, h, icon, segmented, setText, store } from "../ui.js";
 
@@ -84,8 +84,12 @@ export default {
       setSource("file");
     }
 
+    // choice counts the choices (Live, a file), ask the requests: only the answer to the newest request of the
+    // choice shown is used, so live numbers never land on a file's plot
+    let choice = 0, ask = 0;
     function setSource(v) {
       if (v === "file" && !file) { pick(); srcSeg.set(source); return; }
+      choice += 1;
       source = v;
       store("hk.source", v);
       srcSeg.set(v);
@@ -93,16 +97,20 @@ export default {
     }
 
     async function load() {
+      const my = choice, n = ++ask, from = source, path = file;
+      let d = null;
       try {
-        if (source === "file") {
-          const one = await get("/api/files/hk", { path: file });
-          data = { source: "file", run: one.run, boards: [{ ...one, name: one.board }] };
-        } else data = await get("/api/live/hk");
+        if (from === "file") {
+          const one = await get("/api/files/hk", { path }, { timeout: SLOW_MS });
+          d = { source: "file", run: one.run, boards: [{ ...one, name: one.board }] };
+        } else d = await get("/api/live/hk");
       } catch (err) {
-        if (source === "file") fail(err);
-        data = null;
+        if (from === "file" && my === choice && n === ask) fail(err);
+        d = null;
       }
-      if (!gone) show();
+      if (gone || my !== choice || n !== ask || from !== source) return;
+      data = d;
+      show();
     }
 
     function current() {

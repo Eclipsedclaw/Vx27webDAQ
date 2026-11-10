@@ -1,12 +1,13 @@
 // Configuration page: everything a run does, for the run, the trigger setup and each board with its channels.
 // Operators edit (the server keeps the configuration of the next run, and every page sees the edits); viewers see
 // the same form, read-only. Each board shows the exact CAEN FELib parameters it will get ("What this board gets").
-// The check list stays in view below the divider.
+// The check list stays in view below the divider. Edits go to the server with the version they started from: when
+// another operator (or Tune… during a run) changed it meanwhile, this page's changes are put onto theirs.
 import { post, put } from "../api.js";
 import { T, t } from "../i18n.js";
 import { CONF_FILES, basename, chip, choosePath, clear, confirmDialog, dialog, fail, fmtBytes, fmtInt, fmtNum, h, icon, segmented,
          setText, splitter, store, toast, toggle } from "../ui.js";
-import { ROLE_NAMES, SETUP_NAMES, sendToBoards, viewerNotice } from "./run.js";
+import { ROLE_NAMES, SETUP_NAMES, sendToBoards, sequenceGoing, viewerNotice } from "./run.js";
 
 const SETUP_TEXT = {
   master: T("Cables: CLK-OUT → CLK-IN and TRG-OUT → TRG-IN from the first board (the master, e.g. the VX2730) to the next, and so on along the chain. The master triggers on its own channels (the logic below) and sends its trigger out on TRG-OUT; every other board records when it arrives at its TRG-IN and passes it on. Every board records the same moments; the boards further down get the trigger a few ns later (a fixed delay: give them a little more pre-trigger)."),
@@ -30,6 +31,49 @@ const DAC_TEXT = { Static: T("a fixed level"), Ramp: T("a ramp over the ADC rang
                    Square: T("a square wave"), IPE: T("pulses (the pulse emulator)"), ChInput: T("a copy of a channel's input"),
                    MemOccupancy: T("the memory occupancy"), ChSum: T("the sum of the channels"), OverThrSum: T("the channels over threshold") };
 
+// ---- this page's edits onto someone else's (a 409 conflict): what changed here since `base`, field by field ----
+function clone(x) { return JSON.parse(JSON.stringify(x)); }
+
+function same(a, b) {                       // deep equality of JSON values, whatever the order of the keys
+  if (a === b) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null || Array.isArray(a) !== Array.isArray(b)) return false;
+  const ka = Object.keys(a);
+  return ka.length === Object.keys(b).length && ka.every((k) => Object.prototype.hasOwnProperty.call(b, k) && same(a[k], b[k]));
+}
+
+const plain = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
+
+function mergeInto(target, base, mine) {    // the fields of `mine` that differ from `base`, onto `target`
+  for (const k of Object.keys(mine)) {
+    const a = mine[k], b = base ? base[k] : undefined;
+    if (same(a, b)) continue;
+    if (plain(a) && plain(b) && plain(target[k])) mergeInto(target[k], b, a);
+    else if (k === "channels" && Array.isArray(a) && Array.isArray(b) && Array.isArray(target[k])) {
+      for (let c = 0; c < a.length && c < b.length && c < target[k].length; c++) {     // channels by index
+        if (!same(a[c], b[c])) mergeInto(target[k][c], b[c], a[c]);
+      }
+    } else target[k] = clone(a);
+  }
+}
+
+// boards by index and name; when boards were added or removed here: this page's list, with every board it did not
+// change as the server has it now
+function mergeBoards(target, base, mine) {
+  if (mine.length === base.length) {
+    mine.forEach((mb, i) => {
+      const bb = base[i];
+      if (same(mb, bb)) return;
+      const tb = target[i] && target[i].name === bb.name ? target[i] : target.find((x) => x.name === bb.name);
+      if (tb) mergeInto(tb, bb, mb);
+    });
+    return target;
+  }
+  return mine.map((mb) => {
+    const bb = base.find((x) => x.name === mb.name), tb = target.find((x) => x.name === mb.name);
+    return bb && tb && same(mb, bb) ? tb : clone(mb);
+  });
+}
+
 function fmtNs(ns) {
   if (ns === null || ns === undefined || !Number.isFinite(ns)) return "—";
   if (ns < 1000) return `${fmtNum(ns, ns % 1 ? 1 : 0)} ns`;
@@ -41,10 +85,13 @@ export function configPage(root, app) {
   const can = app.can("control");
   const page = h("div.page.fit");
   root.appendChild(page);
-  const path = h("span.sub.mono.small.break"), dirty = h("span");
+  const path = h("span.sub.mono.small.break"), dirty = h("span.row");
   page.appendChild(h("div.page-head", h("h1", t("Configuration")), path, dirty));
   const notice = viewerNotice(app, t("You are watching: the configuration is read-only. Operators edit it."));
   if (notice) page.appendChild(notice);
+  const sendBtn = h("button.btn.btn-sm", { type: "button", disabled: !can, onclick: sendBoards,
+                                          title: t("Reset every board switched on and send it the configuration now, as at the start of a run, without taking data") },
+                    icon("send"), t("Send to boards"));
   page.appendChild(h("div.toolbar",
     h("button.btn.btn-sm", { type: "button", disabled: !can, onclick: newConfig }, icon("plus"), t("New")),
     h("button.btn.btn-sm", { type: "button", disabled: !can, onclick: openFile }, icon("folder"), t("Open…")),
@@ -52,9 +99,7 @@ export function configPage(root, app) {
     h("button.btn.btn-sm", { type: "button", disabled: !can, onclick: saveAs }, t("Save as…")),
     h("button.btn.btn-sm", { type: "button", disabled: !can, onclick: reload }, icon("reset"), t("Reload from file")),
     h("span.sep"),
-    h("button.btn.btn-sm", { type: "button", disabled: !can, onclick: sendBoards,
-                             title: t("Reset every board switched on and send it the configuration now, as at the start of a run, without taking data") },
-      icon("send"), t("Send to boards")),
+    sendBtn,
     h("span.spacer"), h("span.hint", t("Changes are kept on the server for the next run; Save writes them into a .json file."))));
 
   const form = h("div.stack", { style: "padding-right:4px" });
@@ -63,48 +108,199 @@ export function configPage(root, app) {
   const checkCard = h("div.card.fill", h("div.card-head", h("h2.card-title", t("Check"))), h("div.card-body.scroll", problemsBox));
   page.appendChild(splitter(top, checkCard, { key: "config.check", vertical: true, initial: 0.78 }));
 
-  let model = JSON.parse(JSON.stringify(app.state.config.config));
-  let version = app.state.config.version;
-  let timer = null;
+  let model = clone(app.state.config.config);    // what the form shows and edits
+  let base = clone(model);                        // the server's copy the edits started from
+  let version = app.state.config.version;         // its version
+  let timer = null;                               // an edit waiting to go (400 ms after the last)
+  let pendingRebuild = false;                     // an edit that changes the form: built again from the server's answer
   let inputs = {};
 
   // ---- the note ----
   let noteTimer = null;
   const noteInput = h("textarea.input.note-input", { rows: "3", maxlength: "4000", disabled: !can, "aria-label": t("Note"),
                       placeholder: can ? t("What these runs are about: the source and where it is, high voltage, cables, what is being tested…") : "",
-                      oninput: () => { clearTimeout(noteTimer); noteTimer = setTimeout(sendNote, 600); } });
+                      oninput: () => { clearTimeout(noteTimer); noteTimer = setTimeout(() => sendNote().catch(notify), 600); } });
   noteInput.value = app.state.config.note || "";
-  async function sendNote() {
-    noteTimer = null;
-    try {
-      app.state.config = await put("/api/note", { note: noteInput.value });
-      version = app.state.config.version;
-      showHeader();
-    } catch (err) { fail(err); }
-  }
   top.insertBefore(h("div.card", { style: "margin-bottom:12px" },
     h("div.card-head", h("h2.card-title", t("Note")),
       h("span.card-sub", t("Kept with the configuration (Save writes it into the file) and with every run: in its run folder, in the header of each data file, and next to it as NAME.json"))),
     h("div.card-body", noteInput)), form);
 
   // ---- sending edits ----
+  // One write at a time (the configuration, then the note), each with the version it started from. A 409 conflict
+  // (someone else changed it meanwhile): this page's changes since `base` onto the server's copy, sent once more; a
+  // second conflict: the server's copy, and a toast. A refused or lost write keeps the edits and says so (a red
+  // chip); they go with the next edit, or again after 5 s when the server did not answer.
+  let pumping = null, wanted = false, noteWanted = false;   // the writes going; another one to follow
+  let unsent = null, notified = null, retryTimer = null;    // why the edits are not on the server; the last toast
+  let stale = false;                                        // a newer configuration came while edits were waiting
+  let leaving = false;                                      // the page is being closed: the writes must outlive it
+
   function edited(rebuild = false) {
+    pendingRebuild = pendingRebuild || rebuild;
     showInfo();
     clearTimeout(timer);
-    timer = setTimeout(() => send(rebuild), 400);
+    timer = setTimeout(() => send().catch(notify), 400);
   }
 
-  async function send(rebuild) {
+  function notify(err) {                       // a write that failed by itself (not asked for by Save): told once
+    const msg = err && err.message ? err.message : String(err);
+    if (msg !== notified) { notified = msg; fail(err); }
+  }
+
+  function send() {                            // resolves when the edits made so far are on the server, else rejects
+    clearTimeout(timer);
     timer = null;
+    wanted = true;
+    return pumpNow();
+  }
+
+  function sendNote() {
+    clearTimeout(noteTimer);
+    noteTimer = null;
+    noteWanted = true;
+    return pumpNow();
+  }
+
+  function pumpNow() {
+    clearTimeout(retryTimer);
+    if (!pumping) pumping = pump().finally(() => { pumping = null; });
+    return pumping;
+  }
+
+  async function pump() {
+    let failure = null;
+    while (!failure && (wanted || noteWanted)) {
+      if (wanted) { wanted = false; try { await putConfig(false); } catch (err) { failure = err; } }
+      if (noteWanted) { noteWanted = false; try { await putNote(false); } catch (err) { failure = failure || err; } }
+    }
+    if (failure) throw failure;
+  }
+
+  function conflict(err) { return err && err.status === 409 && err.data && err.data.conflict && err.data.current; }
+
+  async function putConfig(second) {
+    const sent = clone(model), rebuild = pendingRebuild;
+    pendingRebuild = false;
+    const k = sent.boards.findIndex((b) => { const nc = b.n_channels ?? 0; return !Number.isInteger(nc) || nc < 0 || nc > 64; });
+    if (k >= 0) {                              // the server would refuse the whole configuration (400)
+      pendingRebuild = pendingRebuild || rebuild;
+      const err = new Error(t("The number of channels must be a whole number from {lo} to {hi}", { lo: 0, hi: 64 }));
+      setUnsent(err.message);
+      throw err;
+    }
+    let P;
     try {
-      app.state.config = await put("/api/config", { config: model });
-      version = app.state.config.version;
-      const server = app.state.config.config;
-      const reshaped = server.boards.length !== model.boards.length ||
-                       server.boards.some((b, i) => b.channels.length !== model.boards[i].channels.length);
-      if (rebuild || reshaped) adopt(); else { showProblems(); showPlans(); showInfo(); }
-      showHeader();
-    } catch (err) { fail(err); }
+      P = await put("/api/config", { config: sent, base: version }, { keepalive: leaving });
+    } catch (err) {
+      if (conflict(err) && !second) {
+        rebase(err.data.current);
+        pendingRebuild = pendingRebuild || rebuild;
+        return putConfig(true);
+      }
+      if (conflict(err)) {
+        adopt(err.data.current);
+        setUnsent(null);
+        toast(t("Someone else changed the configuration at the same time: your edit could not be applied"), "error");
+        throw err;
+      }
+      pendingRebuild = pendingRebuild || rebuild;
+      failed(err);
+      throw err;
+    }
+    setUnsent(null);
+    took(P, sent, rebuild);
+    return undefined;
+  }
+
+  async function putNote(second) {
+    let c;
+    try {
+      c = await put("/api/note", { note: noteInput.value, base: version }, { keepalive: leaving });
+    } catch (err) {
+      if (conflict(err) && !second) {          // the configuration changed meanwhile: onto it, and the note again
+        rebase(err.data.current);
+        if (!same(model, base)) wanted = true;
+        return putNote(true);
+      }
+      if (conflict(err)) {
+        adopt(err.data.current);
+        toast(t("Someone else changed the configuration at the same time: your edit could not be applied"), "error");
+      } else failed(err);
+      throw err;
+    }
+    newest(c);
+    base = clone(c.config);                    // a note changes only the note (no one else wrote, or it was a 409)
+    version = c.version;
+    if (app.state.config.version <= version) stale = false;
+    showHeader();
+    return undefined;
+  }
+
+  function failed(err) {                       // not on the server: kept here, and sent again when it may work
+    setUnsent(err.message || String(err));
+    if (!err.status || err.status >= 500) retryTimer = setTimeout(() => { if (unsent) flush().catch(notify); }, 5000);
+  }
+
+  function setUnsent(why) {
+    unsent = why;
+    if (!why) notified = null;
+    showHeader();
+  }
+
+  function newest(c) {                         // the server's copy c, unless a newer one came meanwhile
+    if (!app.state.config || !(c.version < app.state.config.version)) app.state.config = c;
+    return app.state.config;
+  }
+
+  // the server took `sent` and answered with its configuration P
+  function took(P, sent, rebuild) {
+    newest(P);
+    base = clone(P.config);
+    version = P.version;
+    if (app.state.config.version <= version) stale = false;
+    if (timer !== null || wanted || !same(model, sent)) {   // edits made while it went: they go next, the rebuild with them
+      pendingRebuild = pendingRebuild || rebuild;
+      showProblems(); showPlans(); showInfo(); showHeader();
+      return;
+    }
+    if (stale && !typing()) { adopt(); return; }          // someone else's newer change came meanwhile
+    if (rebuild || !same(P.config, sent)) adopt(P); else { showProblems(); showPlans(); showInfo(); showHeader(); }
+  }
+
+  // someone else changed the configuration since `base`: this page's changes since then onto the server's copy now
+  function rebase(current) {
+    const theirs = newest(current);
+    const merged = clone(theirs.config);
+    mergeInto(merged.run, base.run, model.run);
+    mergeInto(merged.trigger, base.trigger, model.trigger);
+    merged.boards = mergeBoards(merged.boards, base.boards, model.boards);
+    model = merged;
+    base = clone(theirs.config);
+    version = theirs.version;
+    stale = false;
+    redraw();
+  }
+
+  // the edits and the note still waiting go now (Save, Send to boards, a reload, the page closing); rejects when the
+  // server did not take them
+  function flush(keepalive = false) {
+    if (keepalive) leaving = true;
+    if (timer) { clearTimeout(timer); timer = null; wanted = true; }
+    if (noteTimer) { clearTimeout(noteTimer); noteTimer = null; noteWanted = true; }
+    if (unsent) { wanted = wanted || !same(model, base); noteWanted = noteWanted || noteInput.value !== (app.state.config.note || ""); }
+    if (!wanted && !noteWanted && !pumping) {
+      if (unsent) setUnsent(null);             // the edits that did not go were undone meanwhile: nothing waits
+      return Promise.resolve();
+    }
+    return pumpNow();
+  }
+
+  function idle() { return !timer && !pumping && !noteTimer && !unsent && same(model, base); }
+
+  function typing() {
+    const el = document.activeElement;
+    return form.contains(el) && ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName);
   }
 
   // ---- form helpers ----
@@ -154,8 +350,11 @@ export function configPage(root, app) {
     inputs["run.sync"] = sync;
     const dataDir = text(() => r.data_dir, (v) => { r.data_dir = v; }, "run.data_dir", "min(520px, 100%)");
     const dataPick = h("button.btn.btn-sm", { type: "button", disabled: !can, onclick: async () => {
-      const p = await choosePath({ title: t("Data folder"), want: "folder", start: r.data_dir });
-      if (p) { dataDir.value = p; r.data_dir = p; edited(); }
+      const p = await choosePath({ title: t("Data folder"), want: "folder", start: model.run.data_dir });
+      if (!p) return;
+      model.run.data_dir = p;                    // the model and the input of now: the form may have been built again meanwhile
+      if (inputs["run.data_dir"]) inputs["run.data_dir"].value = p;
+      edited();
     } }, icon("folder"), t("Choose…"));
     runGrid.append(
       ...field(t("synchronization"), sync, t(SYNC_TEXT[r.sync] || "")),
@@ -258,31 +457,31 @@ export function configPage(root, app) {
     const c = app.state.config;
     const info = c.boards[i] || {};
     const n = model.boards.length;
-    const plan = (c.plans || []).find((p) => p.name === b.name);
-    const move = (d) => { const j = i + d; [model.boards[i], model.boards[j]] = [model.boards[j], model.boards[i]]; edited(true); build(); };
+    const plan = planFor(i);
+    const move = (d) => { const j = i + d; [model.boards[i], model.boards[j]] = [model.boards[j], model.boards[i]]; reordered(); };
     const role = b.enabled && plan ? plan.role : null;
-    const head = h("div.row.nowrap",
+    const head = h("div.row.cfg-board-head",          // wraps on a narrow screen: the buttons stay in the card
       h("span.board-name", b.name || "?"),
       role ? chip(t(ROLE_NAMES[role] || role), role === "master" ? "accent" : "") : chip(t("switched off")),
       h("span.hint", b.model),
       h("span.spacer"),
-      toggle(t("in the run"), b.enabled, (on) => { b.enabled = on; edited(true); build(); }, { disabled: !can }),
+      toggle(t("in the run"), b.enabled, (on) => { b.enabled = on; reordered(); }, { disabled: !can }),
       h("button.btn.btn-sm.btn-icon", { type: "button", disabled: !can || i === 0, title: t("Move up (the first board is the master)"),
                                         "aria-label": t("Move up (the first board is the master)"), onclick: () => move(-1) }, icon("up")),
       h("button.btn.btn-sm.btn-icon", { type: "button", disabled: !can || i === n - 1, title: t("Move down"), "aria-label": t("Move down"), onclick: () => move(1) }, icon("down")),
-      h("button.btn.btn-sm.btn-icon", { type: "button", disabled: !can, title: t("Copy this board"), "aria-label": t("Copy this board"), onclick: () => copyBoard(i) }, icon("copy")),
+      h("button.btn.btn-sm.btn-icon", { type: "button", disabled: !can || n >= c.max_boards, title: t("Copy this board"), "aria-label": t("Copy this board"),
+                                        onclick: () => copyBoard(i) }, icon("copy")),
       h("button.btn.btn-sm.btn-icon", { type: "button", disabled: !can || n < 2, title: t("Remove this board"), "aria-label": t("Remove this board"),
-                                        onclick: () => { model.boards.splice(i, 1); edited(true); build(); } }, icon("trash")));
+                                        onclick: () => { model.boards.splice(i, 1); reordered(); } }, icon("trash")));
     const grid = h("div.form-grid.board-grid");
     const choices = c.model_choices.includes(b.model) ? c.model_choices : [b.model, ...c.model_choices];
     grid.append(
       ...field(t("name"), text(() => b.name, (v) => { b.name = v; }, `boards[${i}].name`, "120px"), t("in file names and on the page: letters, digits, _ . -")),
       ...field(t("address"), text(() => b.uri, (v) => { b.uri = v; }, `boards[${i}].uri`, "min(320px, 100%)"),
                t("dig2://IP-ADDRESS (Ethernet) or dig2://usb:PID (USB 3); the factory address is 192.168.0.254")),
-      ...field(t("model"), select(choices.map((m) => [m, m]), () => b.model, (v) => { b.model = v; b.n_channels = 0; }, `boards[${i}].model`),
-               t((c.models.find((m) => b.model.includes(m.family)) || {}).text || "")),
-      ...field(t("channels"), number(() => b.n_channels || info.channels || 0, (v) => { b.n_channels = v; }, `boards[${i}].n_channels`, { lo: 1, hi: 64, width: "90px", rebuild: true }),
-               t("its inputs, as Check boards reads them: 64 on a VX2740, 32 or 16 on a VX2730")),
+      ...field(t("model"), select(choices.map((m) => [m, m]), () => b.model, (v) => { setModel(b, v); b.n_channels = 0; }, `boards[${i}].model`),
+               ((m) => (m ? t(m.text) : ""))(c.models.find((m) => b.model.includes(m.family)))),
+      ...field(t("channels"), channelCount(b, i, info), t("its inputs, as Check boards reads them: 64 on a VX2740, 32 or 16 on a VX2730")),
       ...field(t("record length"), [number(() => b.record_length, (v) => { b.record_length = v; }, `boards[${i}].record_length`, { lo: 4, hi: 6250000, width: "120px" }),
                                     h("span.text2", t("samples")), h("span.live", { id: `live-rec-${i}` })]),
       ...field(t("pre-trigger"), [number(() => b.pre_trigger, (v) => { b.pre_trigger = v; }, `boards[${i}].pre_trigger`, { lo: 0, hi: 6250000, width: "120px" }),
@@ -304,20 +503,90 @@ export function configPage(root, app) {
              channelEditor(b, i, info), extraEditor(b, i), planBox(b, i));
   }
 
-  // the board's own trigger, as WaveDump2 shows it: the mask (the channels that make the board trigger: click them
-  // in or out) and every channel's threshold. Only on a board that triggers on its own channels; the Channels
-  // table below edits the same values, and each keeps the other in step (data-thr, data-mask)
-  function syncInputs(key, value, skip) {
-    form.querySelectorAll(`[data-thr="${key}"]`).forEach((el) => { if (el !== skip) el.value = String(value); });
+  // a board's number of channels: sent when it is complete (Enter, or leaving the field), from 0 (the model's usual
+  // number) to 64; fewer channels than now asks first, since the settings of the others go with them
+  function channelCount(b, i, info) {
+    const el = h("input.input.num", { type: "number", min: "0", max: "64", step: "1", disabled: !can, style: "width:90px",
+                                      value: String(b.n_channels || info.channels || 0), onchange: () => changeCount(b, i, info, el) });
+    inputs[`boards[${i}].n_channels`] = el;
+    return el;
   }
 
-  function syncMask(i, c, on) {
-    form.querySelectorAll(`[data-mask="${i}:${c}"]`).forEach((el) => {
-      if (el.type === "checkbox") el.checked = on;
-      else { el.classList.toggle("on", on); el.setAttribute("aria-pressed", on ? "true" : "false"); }
+  async function changeCount(b, i, info, el) {
+    const v = Number(el.value), now = b.channels.length;
+    const back = () => { el.value = String(b.n_channels || info.channels || now); };
+    if (el.value.trim() === "" || !Number.isInteger(v) || v < 0 || v > 64) {
+      toast(t("The number of channels must be a whole number from {lo} to {hi}", { lo: 0, hi: 64 }), "error");
+      back();
+      return;
+    }
+    const n = v || info.usual_channels || now;
+    if (n < now && !(await confirmDialog(t("Fewer channels"), [t("Channels {a}–{b} of {name} will be removed, with their settings.", { a: n, b: now - 1, name: b.name })],
+                                         t("Remove"), "danger"))) { back(); return; }
+    b.n_channels = v;
+    edited(true);
+  }
+
+  // a board's model: what the new model does not have goes back to its neutral value (decimation 1, gains 0),
+  // else the check reports an error in a field the form no longer shows
+  function setModel(b, name) {
+    b.model = name;
+    const m = (app.state.config.models || []).find((x) => name.includes(x.family));
+    if (!m || !m.decimation) b.decimation = 1;
+    if (!m || !m.gain) b.channels.forEach((ch) => { ch.gain = 0; });
+  }
+
+  // boards moved, switched on or off, added or removed: only the first board switched on (the master) may start
+  // the run on a hardware signal, so a board no longer first loses that (its field is not shown any more)
+  function reordered() {
+    const first = model.boards.findIndex((b) => b.enabled);
+    model.boards.forEach((b, k) => { if (b.enabled && k !== first && b.io_start) b.io_start = ""; });
+    edited(true);
+    build();
+  }
+
+  // what board i gets: its plan by name, else by its place in the run (a board renamed and not yet sent)
+  function planFor(i) {
+    const c = app.state.config, plans = c.plans || [], b = model.boards[i];
+    const named = b && plans.find((p) => p.name === b.name);
+    if (named) return named;
+    const place = (c.boards[i] || {}).place;
+    return b && b.enabled && place !== null && place !== undefined ? plans[place] || null : null;
+  }
+
+  // the board's own trigger, as WaveDump2 shows it: the mask (the channels that make the board trigger: click them
+  // in or out) and every channel's threshold. Only on a board that triggers on its own channels; the Channels
+  // table below edits the same values, and after an edit in either the other shows it: the mask buttons and "in
+  // trigger" boxes (data-mask), the thresholds (data-thr) and both summaries. skip: the input being typed in
+  function syncChannel(i, k, skip = null) {
+    const x = model.boards[i] && model.boards[i].channels[k];
+    if (!x) return;
+    form.querySelectorAll(`[data-mask="${i}:${k}"]`).forEach((el) => {
+      if (el.type === "checkbox") { el.checked = Boolean(x.self_trigger); return; }
+      el.classList.toggle("on", Boolean(x.self_trigger));
+      el.setAttribute("aria-pressed", x.self_trigger ? "true" : "false");
+      el.classList.toggle("dim", !x.enabled);
+      el.title = !x.enabled ? t("ch{c}: not read out, so it does not trigger", { c: k }) : t("ch{c}: click to put it in the board trigger or take it out", { c: k });
     });
+    form.querySelectorAll(`[data-thr="${i}:${k}"]`).forEach((el) => { if (el !== skip) el.value = String(x.threshold); });
+    showSummaries(i);
+  }
+
+  function syncBoard(i) { model.boards[i].channels.forEach((_, k) => syncChannel(i, k)); }
+
+  function showSummaries(i) {
+    const b = model.boards[i], [read, trig] = chanSummary(i);
     const sum = form.querySelector(`[data-trig-summary="${i}"]`);
-    if (sum) setText(sum, trigSummary(model.boards[i]));
+    if (sum) setText(sum, trigSummary(b));
+    const on = form.querySelector(`[data-ch-summary="${i}"]`), trg = form.querySelector(`[data-ch-trigger="${i}"]`);
+    if (on) setText(on, read);
+    if (trg) setText(trg, trig);
+  }
+
+  function chanSummary(i) {                  // the Channels section's title: how many are read out, and in the trigger
+    const b = model.boards[i], self = Boolean((app.state.config.boards[i] || {}).self_trigger);
+    return [t("Channels: {on} of {n} read out", { on: b.channels.filter((x) => x.enabled).length, n: b.channels.length }),
+            self ? ` · ${t("{k} in the board trigger", { k: b.channels.filter((x) => x.enabled && x.self_trigger).length })}` : ""];
   }
 
   function trigSummary(b) {
@@ -337,14 +606,14 @@ export function configPage(root, app) {
     const box = h("details.cfg-trig", { ontoggle: () => store(`config.trig.${i}`, box.open ? null : "0") },
       h("summary", icon("zoom"), t("Trigger"), h("span.hint", { dataset: { trigSummary: String(i) } }, trigSummary(b))));
     box.open = store(`config.trig.${i}`) !== "0";
-    const all = (fn) => { ch.forEach((x, c) => fn(x, c)); edited(true); };
+    const all = (fn) => { ch.forEach((x, c) => fn(x, c)); edited(true); syncBoard(i); };
     const btn = (text, title, fn) => h("button.btn.btn-sm", { type: "button", disabled: !can, title, onclick: () => all(fn) }, text);
     const maskGrid = h("div.chan-grid", { role: "group", "aria-label": t("Trigger mask") }, ch.map((x, c) => {
       const b2 = h("button.chan", { type: "button", disabled: !can, "aria-pressed": x.self_trigger ? "true" : "false",
                                     dataset: { mask: `${i}:${c}` },
                                     title: !x.enabled ? t("ch{c}: not read out, so it does not trigger", { c })
                                                       : t("ch{c}: click to put it in the board trigger or take it out", { c }),
-                                    onclick: () => { x.self_trigger = !x.self_trigger; edited(); syncMask(i, c, x.self_trigger); } }, String(c));
+                                    onclick: () => { x.self_trigger = !x.self_trigger; edited(); syncChannel(i, c); } }, String(c));
       if (x.self_trigger) b2.classList.add("on");
       if (!x.enabled) b2.classList.add("dim");
       return b2;
@@ -356,8 +625,7 @@ export function configPage(root, app) {
       const el = h("input.input.num", { type: "number", min: "0", max: "65535", value: String(x.threshold), disabled: !can,
                                         "aria-label": t("threshold of ch{c}", { c }), dataset: { thr: `${i}:${c}` },
                                         oninput: () => { const v = Math.round(Number(el.value)); if (el.value !== "" && Number.isFinite(v) && v >= 0) {
-                                          x.threshold = v; edited(); syncInputs(`${i}:${c}`, v, el);
-                                          const sum = form.querySelector(`[data-trig-summary="${i}"]`); if (sum) setText(sum, trigSummary(b)); } } });
+                                          x.threshold = v; edited(); syncChannel(i, c, el); } } });
       return h("label.thr-cell", h("span.small", `ch${c}`), el);
     }));
     box.append(h("div.stack.cfg-trig-body",
@@ -371,8 +639,12 @@ export function configPage(root, app) {
         h("span.hint", t("ADC counts from each channel's baseline, in the direction of its pulses (Channels: positive)")), h("span.spacer"),
         h("span.label", t("same for all")), same,
         h("button.btn.btn-sm", { type: "button", disabled: !can, onclick: () => {
-          const v = Math.round(Number(same.value));
-          if (Number.isFinite(v) && v >= 0) all((x) => { x.threshold = v; });
+          const v = Math.round(Number(same.value));          // an emptied field is not 0
+          if (same.value.trim() === "" || !Number.isFinite(v) || v < 0 || v > 65535) {
+            toast(t("The threshold must be a whole number from {lo} to {hi}", { lo: 0, hi: 65535 }), "error");
+            return;
+          }
+          all((x) => { x.threshold = v; });
         } }, t("Set"))),
       thrGrid));
     return box;
@@ -411,37 +683,58 @@ export function configPage(root, app) {
     return box;
   }
 
-  function syncedThreshold(el, i, k, b) {          // a threshold of the Channels table: the Trigger panel follows it
+  function syncedThreshold(el, i, k) {             // a threshold of the Channels table: the Trigger panel follows it
     el.dataset.thr = `${i}:${k}`;
-    el.addEventListener("input", () => {
-      syncInputs(`${i}:${k}`, b.channels[k].threshold, el);
-      const sum = form.querySelector(`[data-trig-summary="${i}"]`);
-      if (sum) setText(sum, trigSummary(b));
-    });
+    el.addEventListener("input", () => syncChannel(i, k, el));
     return el;
   }
 
   function channelEditor(b, i, info) {
     const self = Boolean(info.self_trigger);         // this board triggers on its own channels
     const groups = Boolean(model.trigger.combine) && model.trigger.combine !== "A";
-    const nch = b.channels.length;
-    const on = b.channels.filter((x) => x.enabled).length;
+    const chs = b.channels;
     const box = h("details.cfg-channels", { ontoggle: () => store(`config.channels.${i}`, box.open ? "1" : null) },
-      h("summary", icon("grid"), t("Channels: {on} of {n} read out", { on, n: nch }),
-        self ? h("span.hint", ` · ${t("{k} in the board trigger", { k: b.channels.filter((x) => x.enabled && x.self_trigger).length })}`) : null));
+      h("summary", icon("grid"), h("span", { dataset: { chSummary: String(i) } }, chanSummary(i)[0]),
+        h("span.hint", { dataset: { chTrigger: String(i) } }, chanSummary(i)[1])));
     box.open = store(`config.channels.${i}`) === "1";
-    // set all
-    const allOn = h("input", { type: "checkbox", checked: true, disabled: !can, "aria-label": t("read out") });
-    const allDc = h("input.input.num", { type: "number", min: "0", max: "100", step: "0.1", value: String(b.channels[0] ? b.channels[0].dc_offset : 50), disabled: !can, style: "width:80px" });
-    const allThr = h("input.input.num", { type: "number", min: "0", max: "65535", value: String(b.channels[0] ? b.channels[0].threshold : 100), disabled: !can, style: "width:90px" });
-    const allPos = h("input", { type: "checkbox", checked: Boolean(b.channels[0] && b.channels[0].positive), disabled: !can, "aria-label": t("positive pulses") });
-    const allTrig = h("input", { type: "checkbox", checked: true, disabled: !can, "aria-label": t("in trigger") });
-    const apply = h("button.btn.btn-sm", { type: "button", disabled: !can, onclick: () => {
-      for (const ch of b.channels) {
-        ch.enabled = allOn.checked; ch.dc_offset = Number(allDc.value); ch.threshold = Math.round(Number(allThr.value));
-        ch.positive = allPos.checked; ch.self_trigger = allTrig.checked;
+    // set all: each field starts as the channels are (a box half ticked, a number empty, when they differ); only the
+    // fields changed here go to every channel, never an empty one, and "in trigger" only where it is shown
+    const touched = new Set();
+    const every = (key) => chs.length > 0 && chs.every((x) => Boolean(x[key]));
+    const mixed = (key) => chs.some((x) => Boolean(x[key])) && !every(key);
+    const one = (key) => (chs.length && chs.every((x) => x[key] === chs[0][key]) ? String(chs[0][key]) : "");
+    const touch = (key) => () => { touched.add(key); apply.disabled = !can; };
+    const tick = (key, label) => {
+      const el = h("input", { type: "checkbox", checked: every(key), disabled: !can, "aria-label": label, onchange: touch(key) });
+      el.indeterminate = mixed(key);
+      return el;
+    };
+    const allOn = tick("enabled", t("read out"));
+    const allDc = h("input.input.num", { type: "number", min: "0", max: "100", step: "0.1", value: one("dc_offset"), disabled: !can, style: "width:80px",
+                                         "aria-label": t("DC offset"), oninput: touch("dc_offset") });
+    const allThr = h("input.input.num", { type: "number", min: "0", max: "65535", value: one("threshold"), disabled: !can, style: "width:90px",
+                                          "aria-label": t("threshold"), oninput: touch("threshold") });
+    const allPos = tick("positive", t("positive pulses"));
+    const allTrig = tick("self_trigger", t("in trigger"));
+    const apply = h("button.btn.btn-sm", { type: "button", disabled: true, onclick: () => {
+      const dc = Number(allDc.value), thr = Math.round(Number(allThr.value));
+      if (touched.has("dc_offset") && (allDc.value.trim() === "" || !(dc >= 0 && dc <= 100))) {
+        toast(t("The DC offset must be from {lo} to {hi} %", { lo: 0, hi: 100 }), "error");
+        return;
       }
-      edited(true); build();
+      if (touched.has("threshold") && (allThr.value.trim() === "" || !(thr >= 0 && thr <= 65535))) {
+        toast(t("The threshold must be a whole number from {lo} to {hi}", { lo: 0, hi: 65535 }), "error");
+        return;
+      }
+      for (const ch of chs) {
+        if (touched.has("enabled")) ch.enabled = allOn.checked;
+        if (touched.has("dc_offset")) ch.dc_offset = dc;
+        if (touched.has("threshold")) ch.threshold = thr;
+        if (touched.has("positive")) ch.positive = allPos.checked;
+        if (self && touched.has("self_trigger")) ch.self_trigger = allTrig.checked;
+      }
+      edited(true);
+      build();
     } }, t("Apply to all channels"));
     box.appendChild(h("div.row.all-row", h("span.label", t("all channels:")), h("label.row.nowrap", allOn, t("read out")),
                       h("span.label", t("DC offset")), allDc, h("span.text2", "%"),
@@ -459,12 +752,12 @@ export function configPage(root, app) {
       const cb = (key, label) => {
         const el = h("input", { type: "checkbox", checked: Boolean(ch[key]), disabled: !can, "aria-label": `${label} ch${k}`,
                                 dataset: key === "self_trigger" ? { mask: `${i}:${k}` } : undefined,
-                                onchange: () => { ch[key] = el.checked; edited(); if (key === "self_trigger") syncMask(i, k, el.checked); } });
+                                onchange: () => { ch[key] = el.checked; edited(); syncChannel(i, k); } });
         return h("td", el);
       };
       return h("tr", h("th.rowh", String(k)), cb("enabled", t("read out")),
                h("td", number(() => ch.dc_offset, (v) => { ch.dc_offset = v; }, `${w}.dc_offset`, { lo: 0, hi: 100, step: 0.1, float: true, width: "80px" })),
-               h("td", syncedThreshold(number(() => ch.threshold, (v) => { ch.threshold = v; }, `${w}.threshold`, { lo: 0, hi: 65535, width: "90px" }), i, k, b)),
+               h("td", syncedThreshold(number(() => ch.threshold, (v) => { ch.threshold = v; }, `${w}.threshold`, { lo: 0, hi: 65535, width: "90px" }), i, k)),
                cb("positive", t("positive")), self ? cb("self_trigger", t("in trigger")) : null,
                self && groups ? h("td", select([["A", "A"], ["B", "B"]], () => ch.itl || "A", (v) => { ch.itl = v; }, `${w}.itl`, false)) : null,
                info.gain ? h("td", number(() => ch.gain, (v) => { ch.gain = v; }, `${w}.gain`, { lo: 0, hi: 40, step: 0.5, float: true, width: "80px" })) : null);
@@ -493,7 +786,7 @@ export function configPage(root, app) {
   }
 
   function planBox(b, i) {
-    const box = h("details.cfg-plan", { dataset: { plan: b.name }, ontoggle: () => store(`config.plan.${i}`, box.open ? "1" : null) },
+    const box = h("details.cfg-plan", { dataset: { board: String(i) }, ontoggle: () => store(`config.plan.${i}`, box.open ? "1" : null) },
       h("summary", icon("list"), t("What this board gets")));
     box.open = store(`config.plan.${i}`) === "1";
     box.appendChild(h("div.plan-body"));
@@ -501,9 +794,8 @@ export function configPage(root, app) {
   }
 
   function showPlans() {
-    const plans = app.state.config.plans || [];
-    document.querySelectorAll(".cfg-plan").forEach((box) => {
-      const p = plans.find((x) => x.name === box.dataset.plan);
+    form.querySelectorAll(".cfg-plan").forEach((box) => {
+      const p = planFor(Number(box.dataset.board));
       const body = box.querySelector(".plan-body");
       if (!p) { clear(body, h("p.hint", t("This board is not in the run (switched off), or its model is not known."))); return; }
       clear(body, h("p.hint", { style: "margin:4px 0" }, t("In this order, after /cmd/Reset; then the raw endpoint is activated and the board is armed.")),
@@ -516,10 +808,10 @@ export function configPage(root, app) {
     const res = (app.state.boards && app.state.boards.results) || [];
     let n = 0;
     for (const b of model.boards) {
-      const r = res.find((x) => x.name === b.name && x.ok && x.facts && !x.stale);
+      const r = res.find((x) => x.name === b.name && x.uri === b.uri && x.ok && x.facts && !x.stale);   // checked at this address
       if (!r) continue;
       const f = r.facts, fam = (f.model || "").replace(/\D/g, "").slice(0, 4);
-      if (f.model && app.state.config.models.some((m) => m.family === fam)) b.model = f.model;
+      if (f.model && app.state.config.models.some((m) => m.family === fam)) setModel(b, f.model);
       if (f.channels) b.n_channels = f.channels;
       n += 1;
     }
@@ -530,6 +822,7 @@ export function configPage(root, app) {
   }
 
   function addBoard() {
+    if (model.boards.length >= app.state.config.max_boards) return;       // the server keeps no more
     const used = new Set(model.boards.map((b) => b.name));
     let k = model.boards.length;
     while (used.has(`b${k}`)) k++;
@@ -540,19 +833,18 @@ export function configPage(root, app) {
     nb.run_delay_ns = null;
     nb.clock_out_delay_ps = null;
     model.boards.push(nb);
-    edited(true);
-    build();
+    reordered();
   }
 
   function copyBoard(i) {
+    if (model.boards.length >= app.state.config.max_boards) return;       // the server keeps no more
     const nb = JSON.parse(JSON.stringify(model.boards[i]));
     const used = new Set(model.boards.map((b) => b.name));
     let k = model.boards.length;
     while (used.has(`b${k}`)) k++;
     nb.name = `b${k}`;
     model.boards.splice(i + 1, 0, nb);
-    edited(true);
-    build();
+    reordered();
   }
 
   async function sameWindow() {
@@ -596,8 +888,8 @@ export function configPage(root, app) {
               h("label.row.nowrap", pos, t("positive pulses (else negative)"))),
       actions: [{ label: t("Cancel"), value: null },
                 { label: t("Apply to all boards"), kind: "primary", run: () => {
-                  const v = Number(input.value);
-                  if (!Number.isInteger(v) || v < 0 || v > 65535) throw new Error(t("The threshold must be a whole number from {lo} to {hi}", { lo: 0, hi: 65535 }));
+                  const v = Number(input.value);                 // an emptied field is not 0
+                  if (input.value.trim() === "" || !Number.isInteger(v) || v < 0 || v > 65535) throw new Error(t("The threshold must be a whole number from {lo} to {hi}", { lo: 0, hi: 65535 }));
                   return v;
                 } }],
       onOpen: (m) => { submit = m.querySelector(".btn-primary"); input.select(); },
@@ -646,29 +938,52 @@ export function configPage(root, app) {
   function showHeader() {
     const c = app.state.config;
     setText(path, c.path ? t("File: {path}", { path: c.path }) : t("(not saved)"));
-    clear(dirty, c.dirty ? chip(t("changed, not saved"), "warning") : null);
+    clear(dirty, unsent ? chip(t("not sent to the server: {why}", { why: unsent }), "critical", "alert") : null,
+          c.dirty ? chip(t("changed, not saved"), "warning") : null);
+  }
+
+  function showSendBtn() {                     // the boards are the DAQ's during a run or a sequence, the check's during one
+    const busy = (app.state.run && app.state.run.active) || sequenceGoing(app) || (app.state.boards && app.state.boards.running);
+    sendBtn.disabled = !can || Boolean(busy);
   }
 
   // ---- files ----
+  // New, Open and Reload replace the configuration: edits not saved to a file, or not even on the server, are
+  // discarded only when the user says so
+  async function discardOk() {
+    const waiting = Boolean(timer || pumping || unsent || noteTimer);
+    if (!app.state.config.dirty && !waiting) return true;
+    if (!(await confirmDialog(t("Unsaved changes"), [t("The configuration has unsaved changes. Discard them?")], t("Discard")))) return false;
+    clearTimeout(timer);
+    clearTimeout(noteTimer);
+    clearTimeout(retryTimer);
+    timer = noteTimer = null;
+    wanted = noteWanted = false;
+    setUnsent(null);
+    if (pumping) await pumping.catch(() => {});      // the write going ends first: the new configuration comes after it
+    return true;
+  }
+
   async function newConfig() {
-    if (app.state.config.dirty && !(await confirmDialog(t("Unsaved changes"), [t("The configuration has unsaved changes. Discard them?")], t("Discard")))) return;
-    try { app.state.config = await post("/api/config/new"); adopt(); } catch (err) { fail(err); }
+    if (!(await discardOk())) return;
+    try { adopt(await post("/api/config/new")); } catch (err) { fail(err); }
   }
 
   async function openFile() {
-    if (app.state.config.dirty && !(await confirmDialog(t("Unsaved changes"), [t("The configuration has unsaved changes. Discard them?")], t("Discard")))) return;
-    const p = await choosePath({ title: t("Open an Vx27webDAQ configuration"), want: "file", filters: CONF_FILES,
+    if (!(await discardOk())) return;
+    const p = await choosePath({ title: t("Open a Vx27webDAQ configuration"), want: "file", filters: CONF_FILES,
                                 start: app.state.settings.default_folder || app.state.config.path });   // the lab's data folder first
     if (!p) return;
-    try { app.state.config = await post("/api/config/open", { path: p }); adopt(); } catch (err) { fail(err); }
+    try { adopt(await post("/api/config/open", { path: p })); } catch (err) { fail(err); }
   }
 
   async function save(p) {
-    if (timer) { clearTimeout(timer); await send(false); }
+    try { await flush(); } catch (err) { fail(err); return; }     // the edits and the note first: else not saved
     if (!p && !app.state.config.path) { await saveAs(); return; }
     try {
       const r = await post("/api/config/save", p ? { path: p } : {});
-      app.state.config = r;
+      newest(r);
+      if (same(r.config, base)) version = r.version;     // saving changed no setting: the edits still start from here
       toast(t("Saved {path}", { path: r.path }), "ok");
       showHeader();
     } catch (err) { fail(err); }
@@ -681,38 +996,58 @@ export function configPage(root, app) {
     if (p) await save(p);
   }
 
-  // Send to boards: the edits still waiting to go to the server go first, so the boards get what the page shows
+  // Send to boards: the edits still waiting go to the server first, so the boards get what the page shows; when they
+  // do not go, nothing is sent
   function sendBoards() {
-    return sendToBoards(app, async () => { if (timer) { clearTimeout(timer); await send(false); } });
+    return sendToBoards(app, () => flush());
   }
 
   async function reload() {
-    if (app.state.config.dirty && !(await confirmDialog(t("Unsaved changes"), [t("The configuration has unsaved changes. Discard them?")], t("Discard")))) return;
-    try { app.state.config = await post("/api/config/reload"); adopt(); } catch (err) { fail(err); }
+    if (!(await discardOk())) return;
+    try { adopt(await post("/api/config/reload")); } catch (err) { fail(err); }
   }
 
-  function adopt() {
-    model = JSON.parse(JSON.stringify(app.state.config.config));
-    version = app.state.config.version;
+  // the server's configuration c (or a newer one that came meanwhile) into the form
+  function adopt(c = app.state.config) {
+    const use = newest(c);
+    model = clone(use.config);
+    base = clone(use.config);
+    version = use.version;
+    stale = false;
+    if (!noteTimer && !noteWanted && document.activeElement !== noteInput) noteInput.value = use.note || "";
+    redraw();
+  }
+
+  function redraw() {                          // the form built again where it was: its scroll, and the field being typed in
+    const el = document.activeElement, key = Object.keys(inputs).find((k) => inputs[k] === el);
+    let caret = null;
+    try { caret = el && typeof el.selectionStart === "number" ? [el.selectionStart, el.selectionEnd] : null; } catch (e) { caret = null; }
     const scroll = top.scrollTop;
     build();
     top.scrollTop = scroll;
+    const now = key && inputs[key];
+    if (now && now.focus) {
+      now.focus();
+      try { if (caret) now.setSelectionRange(caret[0], caret[1]); } catch (e) { /* a number field has no caret to set */ }
+    }
   }
 
+  // a newer configuration waited while a field had the focus: it comes when the field is left
+  form.addEventListener("focusout", () => setTimeout(() => { if (stale && idle() && !typing()) adopt(); }, 0));
+
   build();
+  showSendBtn();
   return {
-    update(type, msg) {
+    update(type) {
+      if (type === "run" || type === "sequence" || type === "boards") showSendBtn();
       if (type !== "config" && type !== "settings") return;
-      if (type === "config" && !noteTimer && document.activeElement !== noteInput) noteInput.value = msg.config.note || "";
-      if (type === "config" && msg.config.version !== version) {
-        const typing = form.contains(document.activeElement) && ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName);
-        if (!timer && !typing) adopt();
-        else { showProblems(); showHeader(); }
+      if (type === "config" && !noteTimer && !noteWanted && document.activeElement !== noteInput) noteInput.value = app.state.config.note || "";
+      if (type === "config" && app.state.config.version > version) {     // someone's change (or this page's, echoed)
+        if (idle() && !typing()) adopt();
+        else { stale = true; showProblems(); showHeader(); }
       } else { showProblems(); showPlans(); showHeader(); }
     },
-    unmount() {
-      if (timer) { clearTimeout(timer); send(false); }
-      if (noteTimer) { clearTimeout(noteTimer); sendNote(); }
-    },
+    flush,
+    unmount() { flush().catch(notify); },
   };
 }

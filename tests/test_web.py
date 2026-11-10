@@ -721,6 +721,8 @@ class PageTests(WebTestCase):
         used |= actions | {f"run ended: {phase}" for phase in ("finished", "failed")}
         used |= {"stop record", "time-out", "error"}                                                    # how a board ended
         used |= {"not read out", "no event", "not in this event", "no such board"}                       # combined view
+        from vx27webdaq.core.models import MODELS
+        used |= {m.text for m in MODELS.values()}                                                        # the models
         used |= {"one board", "each board triggers by itself", "independent boards: no common clock"}     # sync check
         cfg = C.default_config()
         for setup in C.SETUPS:                                          # the reasons in "What this board gets"

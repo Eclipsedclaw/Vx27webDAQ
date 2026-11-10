@@ -129,7 +129,7 @@ svg { flex: none; }
 @media (max-width: 900px) { .page.fit { height: auto; min-height: 0; } .log { max-height: 50vh; } }   /* the parts stack */
 .page-head { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
 .page-head h1 { font-size: 20px; font-weight: 650; margin: 0; letter-spacing: 0.1px; }
-.page-head .sub { color: var(--text-2); }
+.page-head .sub { color: var(--text-2); min-width: 0; overflow-wrap: anywhere; }   /* a long path breaks on a phone */
 .notice {
   display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: var(--radius-sm);
   background: var(--surface-2); border: 1px solid var(--border); color: var(--text-2);
@@ -499,9 +499,14 @@ details.explain p { margin: 6px 0 0; font-size: 12.5px; color: var(--text-2); li
 @media (max-width: 1000px) { .mem, .acct-name { display: none; } }
 @media (max-width: 760px) {
   .main { padding: 12px; gap: 12px; }
-  .topbar { gap: 8px; padding: 0 10px; }
+  .topbar { gap: 6px; padding: 0 8px; }
   .brand-name, .brand-version, .mem { display: none; }
   .status-pill .txt { display: none; }
+  /* a phone: every page's link must fit; the language is on the Settings page too, the role in the account menu */
+  .topbar .lang-pick, .topbar .acct-role { display: none; }
+  .topbar-right { gap: 4px; }
+  .nav a { padding: 0 8px; }
+  .status-pill { padding: 0 10px; }
 }
 
 /* ---- Vx27webDAQ: boards of 32 or 64 channels ---- */
@@ -518,6 +523,7 @@ details.explain p { margin: 6px 0 0; font-size: 12.5px; color: var(--text-2); li
 .log .line.warn { color: var(--warning-text); background: var(--warning-soft); }
 .cfg-boards { grid-template-columns: minmax(0, 1fr); }
 .cfg-board .board-grid { margin-top: 6px; }
+.cfg-board-head { gap: 6px 8px; }            /* wraps on a narrow screen, so Copy and Remove stay in the card */
 .cfg-board details { border-top: 1px solid var(--border); padding-top: 6px; }
 .cfg-board details > summary { cursor: pointer; display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13px;
                                color: var(--text-2); list-style: none; padding: 4px 0; }

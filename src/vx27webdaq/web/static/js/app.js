@@ -29,7 +29,63 @@ export const app = {
     if (run.active) return t(PHASES[run.phase] || run.phase);
     return t("Idle");
   },
+  // the server's clock now (s): the time in its newest message plus the time since that message came, so that a
+  // browser whose clock is off still counts the server's seconds (Kill 15 s after Stop, quiet boards)
+  serverNow() { return Date.now() / 1000 + clockOffset; },
+  // the edits a page still holds back (the Configuration page sends them 400 ms after the last key) go to the
+  // server now; keepalive: the page is being closed, the request must outlive it
+  flush(keepalive = false) {
+    try { return Promise.resolve(this.page && this.page.flush ? this.page.flush(keepalive) : null); } catch (err) { return Promise.resolve(); }
+  },
+  // a reload (language, theme, signing in or out) after the page's edits have gone; waits at most 5 s for them
+  async reload() {
+    await Promise.race([this.flush().catch(() => {}), new Promise((ok) => setTimeout(ok, 5000))]);
+    location.reload();
+  },
 };
+
+let clockOffset = 0;            // the server's clock minus this browser's (s)
+function stamp(obj) {           // a message's "now" (the server's clock when it was made) against this browser's clock
+  if (obj && typeof obj.now === "number") clockOffset = obj.now - Date.now() / 1000;
+}
+
+// the MB/s plot of the Run page: at most about MBPS_POINTS points. The run going: past that many, every second
+// point goes and from then on only every second point is kept (the step doubles), the newest one shown until the
+// next is a step on; a finished run: thinned once
+const MBPS_POINTS = 2000;
+function thinned(series) {
+  if (!series || series.length <= MBPS_POINTS) return series || [];
+  const k = Math.ceil(series.length / MBPS_POINTS);
+  return series.filter((_, i) => i % k === 0 || i === series.length - 1);
+}
+
+function keepMbps(run, old) {
+  if (!run) return;
+  if (!run.active) {
+    if (run.last && run.last.mbps_series) run.last.mbps_series = thinned(run.last.mbps_series);
+    return;
+  }
+  const same = old && old.active && old.run_dir === run.run_dir;
+  let series = same && old.mbps_series ? old.mbps_series : (run.mbps_series || []).slice();
+  let step = (same && old.mbps_step) || 1, version = (same && old.mbps_version) || 0, tail = Boolean(same && old.mbps_tail);
+  const p = run.mbps_point, newest = series[series.length - 1];
+  if (p && (!newest || p[0] > newest[0])) {                  // a new point (about one a second)
+    if (tail) series.pop();                                   // the newest point so far was there to be shown only
+    const kept = series[series.length - 1];
+    tail = Boolean(kept) && p[0] - kept[0] < step - 0.5;      // less than a step on from the last one kept
+    series.push(p);
+    version += 1;
+  }
+  while (series.length > MBPS_POINTS) {
+    const end = tail ? series.pop() : null;
+    series = series.filter((_, i) => i % 2 === 0 || i === series.length - 1);
+    if (end) series.push(end);
+    step *= 2;
+    version += 1;
+  }
+  // version: changes with every point, so the plot is drawn again only then
+  Object.assign(run, { mbps_series: series, mbps_step: step, mbps_version: version, mbps_tail: tail });
+}
 
 function applyMessage(msg) {
   const s = app.state;
@@ -37,16 +93,14 @@ function applyMessage(msg) {
     case "hello":
       app.me = msg.me;
       app.state = msg.state;
+      stamp(msg.state.run);
+      stamp(msg.state.sequence);
+      keepMbps(msg.state.run, null);
       setDefaultFolder(msg.state.settings.default_folder);
       return;
     case "run": {
-      const old = s.run;
-      const series = old && old.active && msg.run.active && old.run_dir === msg.run.run_dir ? old.mbps_series || [] : [];
-      const p = msg.run.mbps_point;
-      if (msg.run.active) {
-        if (p && (!series.length || p[0] > series[series.length - 1][0])) series.push(p);
-        msg.run.mbps_series = series;
-      }
+      stamp(msg.run);
+      keepMbps(msg.run, s.run);
       s.run = msg.run;
       return;
     }
@@ -56,24 +110,34 @@ function applyMessage(msg) {
       return;
     case "log_reset": s.log = []; return;
     case "stats": s.stats = msg.stats; return;
-    case "config": s.config = msg.config; return;
+    case "config":                     // never an older configuration than the one the page has (a late message)
+      if (!s.config || !(msg.config.version < s.config.version)) s.config = msg.config;
+      return;
     case "settings": s.settings = msg.settings; setDefaultFolder(msg.settings.default_folder); return;
     case "roots": s.roots = msg.roots; return;
     case "boards": s.boards = msg.boards; return;
     case "root": s.root = msg.root; return;
     case "memory": s.memory = msg.memory; return;
-    case "sequence": s.sequence = msg.sequence; return;
+    case "sequence": stamp(msg.sequence); s.sequence = msg.sequence; return;
     default:
   }
 }
 
 // ---- the live connection ----
-let socket = null, retry = 0, firstHello = true;
+// The server says something at least every 5 s (the memory in use): after QUIET_MS of silence the connection is
+// taken as dead (a laptop that slept, a stalled ssh tunnel never close it) and made again. Before connecting again
+// the page asks who it is: a server that lets nobody in without signing in (after a restart, or a sign-out
+// elsewhere: the server closes with code 4401) gets the sign-in instead of a retry every 15 s.
+const QUIET_MS = 15000, SIGNED_OUT = 4401;
+let socket = null, retry = 0, firstHello = true, heard = 0;
 
 function connect() {
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/events`);
   socket = ws;
+  heard = Date.now();
   ws.onmessage = (ev) => {
+    if (socket !== ws) return;
+    heard = Date.now();
     const msg = JSON.parse(ev.data);
     applyMessage(msg);
     if (msg.type === "hello") {
@@ -86,12 +150,32 @@ function connect() {
     updateTop(msg.type);
     if (app.page && app.page.update) app.page.update(msg.type, msg);
   };
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
     if (socket !== ws) return;
-    setConnected(false);
-    const wait = Math.min(15000, 500 * 2 ** retry++);
-    setTimeout(connect, wait);
+    socket = null;
+    lost(ev.code);
   };
+}
+
+setInterval(() => {                        // silence: the connection is dead even if it was never closed
+  if (!socket || Date.now() - heard < QUIET_MS) return;
+  const ws = socket;
+  socket = null;                           // its close, whenever it comes, is not waited for
+  try { ws.close(); } catch (e) { /* closed already */ }
+  lost(0);
+}, 5000);
+
+const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
+const backoff = () => Math.min(15000, 500 * 2 ** retry++);
+
+async function lost(code) {
+  setConnected(false);
+  if (code !== SIGNED_OUT) await sleep(backoff());
+  let me = null;
+  try { me = await get("/api/me", undefined, { timeout: 10000 }); } catch (err) { me = null; }     // null: no answer yet
+  if (me && !me.role) { app.me = me; showSignIn(); return; }       // signed out, and no guests here: sign in, no retry
+  if (code === SIGNED_OUT) await sleep(backoff());
+  connect();
 }
 
 function setConnected(on) {
@@ -108,6 +192,7 @@ function notifyRoot(r) {
   if (!r) return;
   const name = (r.root || r.raw).split("/").pop();
   if (r.status === "ok") toast(t("ROOT file ready: {name}", { name }), "ok");
+  else if (r.status === "skipped") toast(`${t("ROOT conversion of {name}: {status}", { name, status: t(r.status) })}${r.message ? ` · ${r.message}` : ""}`);
   else if (r.status !== "cancelled") toast(t("ROOT conversion of {name}: {status}", { name, status: t(r.status) }), "error");
 }
 
@@ -121,8 +206,8 @@ function renderTop() {
     nav.appendChild(h("a", { href: `#${p.id}`, dataset: { page: p.id }, class: app.pageId === p.id ? "active" : "",
                              title: t(p.title), "aria-label": t(p.title) }, icon(p.icon), h("span.lbl", t(p.title))));
   }
-  const lang = h("select.input", { "aria-label": t("Language"), style: "width:auto;height:30px",
-                                    onchange: async () => { store("lang", lang.value); location.reload(); } },
+  const lang = h("select.input.lang-pick", { "aria-label": t("Language"), style: "width:auto;height:30px",
+                                              onchange: () => { store("lang", lang.value); app.reload(); } },
                  LANGUAGES.map(([v, name]) => h("option", { value: v, selected: (store("lang") || "en") === v }, name)));
   const dark = document.documentElement.getAttribute("data-theme") === "dark" ||
                (!document.documentElement.getAttribute("data-theme") && matchMedia("(prefers-color-scheme: dark)").matches);
@@ -184,19 +269,24 @@ function accountButton() {
   }
   const wrap = h("div.relative");
   const btn = h("button.btn.btn-sm", { type: "button", "aria-haspopup": "menu", onclick: (e) => { e.stopPropagation(); toggle(); } },
-                icon("user"), h("span.acct-name", me.user), roleChip(me.role));
+                icon("user"), h("span.acct-name", me.user), h("span.acct-role", roleChip(me.role)));
   let menu = null;
+  // a click anywhere outside the menu closes it; a click inside (its header) leaves it open, still closing on the next one
+  function outside(e) { if (menu && !menu.contains(e.target)) close(); }
+  function close() {
+    if (!menu) return;
+    menu.remove();
+    menu = null;
+    document.removeEventListener("click", outside);
+  }
   function toggle() {
-    if (menu) { menu.remove(); menu = null; return; }
+    if (menu) { close(); return; }
     menu = h("div.menu", { role: "menu" },
              h("div.who", h("div", t("Signed in as {name}", { name: me.user })), h("div.row", { style: "margin-top:6px" }, roleChip(me.role))),
-             h("button", { type: "button", role: "menuitem", onclick: () => { toggle(); changePassword(); } }, icon("key"), t("Change password")),
+             h("button", { type: "button", role: "menuitem", onclick: () => { close(); changePassword(); } }, icon("key"), t("Change password")),
              h("button", { type: "button", role: "menuitem", onclick: () => signOut() }, icon("logout"), t("Sign out")));
     wrap.appendChild(menu);
-    setTimeout(() => document.addEventListener("click", function off(e) {
-      if (menu && !menu.contains(e.target)) { menu.remove(); menu = null; }
-      document.removeEventListener("click", off);
-    }), 0);
+    setTimeout(() => { if (menu) document.addEventListener("click", outside); }, 0);
   }
   append(wrap, [btn]);
   return wrap;
@@ -218,12 +308,26 @@ export async function signIn(required = false) {
                 run: async () => { await post("/api/login", { name: name.value, password: password.value }); return true; } }],
     onOpen: (m) => { submit = m.querySelector(".btn-primary"); },
   });
-  if (await done) location.reload();
+  if (await done) app.reload();
 }
 
 async function signOut() {
+  await Promise.race([app.flush().catch(() => {}), sleep(5000)]);      // the edits still waiting go first
   try { await post("/api/logout"); } catch (err) { /* signed out anyway */ }
   location.reload();
+}
+
+// nobody may look in without signing in: the page gives way to the sign-in
+function showSignIn() {
+  if (app.page && app.page.unmount) { try { app.page.unmount(); } catch (err) { console.error(err); } }
+  app.page = null;
+  app.pageId = null;
+  clear(document.getElementById("topbar"), h("a.brand", h("span.brand-mark", icon("logo")), h("span.brand-name", "Vx27webDAQ")));
+  clear(document.getElementById("main"),
+        h("div.signin-page.card", h("div.card-head", h("h1.card-title", t("Sign in to Vx27webDAQ"))),
+          h("div.card-body.stack", h("p.text2", { style: "margin:0" }, t("This server lets only signed-in users in.")),
+            h("button.btn.btn-primary", { type: "button", onclick: () => signIn(true) }, icon("user"), t("Sign in")))));
+  signIn(true);
 }
 
 async function changePassword() {
@@ -252,6 +356,10 @@ function route(force = false) {
   let id = (location.hash || "").slice(1) || store("page") || "run";
   if (id === "overview") store("tools.open.overview", "1");    // the Overview is the first tool now
   id = MOVED[id] || id;
+  if (!PAGES.some((p) => p.id === id)) {                        // not a page (e.g. #main): the page shown stays
+    if (app.pageId && !force) { history.replaceState(null, "", `#${app.pageId}`); return; }
+    id = store("page") || "run";
+  }
   const def = PAGES.find((p) => p.id === id && (!p.admin || app.can("admin"))) || PAGES[0];
   id = def.id;
   if (location.hash && location.hash.slice(1) !== id) history.replaceState(null, "", `#${id}`);   // e.g. the old #waveforms
@@ -276,7 +384,15 @@ function start() {
   renderTop();
   route(true);
   window.addEventListener("hashchange", () => route());
+  // closing the tab or leaving the page: the edits still waiting go now (a request that outlives the page)
+  window.addEventListener("pagehide", () => { app.flush(true).catch(() => {}); });
 }
+
+// "Skip to the page" (for the keyboard): to the page's content, without changing the address
+document.querySelector(".skip")?.addEventListener("click", (e) => {
+  e.preventDefault();
+  document.getElementById("main").focus();
+});
 
 async function boot() {
   await loadLanguage(store("lang") || "en");
@@ -288,16 +404,7 @@ async function boot() {
     return;
   }
   app.me = me;
-  if (!me.role) {                 // no guests on this server: signing in comes first
-    document.getElementById("topbar").appendChild(h("a.brand", h("span.brand-mark", icon("logo")),
-                                                    h("span.brand-name", "Vx27webDAQ")));
-    clear(document.getElementById("main"),
-          h("div.signin-page.card", h("div.card-head", h("h1.card-title", t("Sign in to Vx27webDAQ"))),
-            h("div.card-body.stack", h("p.text2", { style: "margin:0" }, t("This server lets only signed-in users in.")),
-              h("button.btn.btn-primary", { type: "button", onclick: () => signIn(true) }, icon("user"), t("Sign in")))));
-    signIn(true);
-    return;
-  }
+  if (!me.role) { showSignIn(); return; }     // no guests on this server: signing in comes first
   connect();
 }
 

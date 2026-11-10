@@ -2,7 +2,7 @@
 // file, in the big part; beside them three tabs: Plot (what the plots show), Progress (the run, one row per board,
 // statistics, the sync check) and Setup (the boards and their cables, setupview.js); under those the DAQ program's
 // output. Everyone sees it live. The dividers can be dragged and the tab is kept (for this browser).
-import { get, post, put } from "../api.js";
+import { SLOW_MS, get, post, put } from "../api.js";
 import { T, t } from "../i18n.js";
 import { LinePlot, fmtTime } from "../plots.js";
 import { basename, chip, clear, confirmDialog, dialog, fail, fmtBytes, fmtCompact, fmtDuration, fmtInt, fmtNum, h, icon,
@@ -49,7 +49,7 @@ export function simulatorWarning(forRun = true) {
 // each is reset and given every parameter, as at the start of a run, without taking data. Start run does the same
 // first anyway; this shows before a run whether every board takes it. before(): the page's own edits are sent first.
 export async function sendToBoards(app, before) {
-  if (app.state.run && app.state.run.active) {
+  if ((app.state.run && app.state.run.active) || sequenceGoing(app)) {      // the server refuses then too
     toast(t("Not during a run: the run sent the configuration to the boards when it started"), "error");
     return;
   }
@@ -66,7 +66,7 @@ export async function sendToBoards(app, before) {
   try {
     if (before) await before();
     toast(t("Sending the configuration to {n} boards…", { n: names.length }));
-    r = await post("/api/boards/apply");
+    r = await post("/api/boards/apply", {}, { timeout: SLOW_MS });
   } catch (err) { fail(err); return; }
   const good = r.results.filter((b) => b.ok).length;
   const rows = r.results.map((b) => {
@@ -84,6 +84,11 @@ export async function sendToBoards(app, before) {
                  body: h("div.stack", r.simulator ? h("div.notice.warn", icon("alert"), t("Simulated boards (the simulator is ON), not the CAEN cards.")) : null,
                          h("ul.problems", rows),
                          all ? null : h("p.hint", { style: "margin:0" }, t("A run would stop at the same place: correct the configuration (or the board), then send it again."))) });
+}
+
+// a sequence of runs is going, also in the pause between two of its runs: the boards are the DAQ's
+export function sequenceGoing(app) {
+  return Boolean(app.state.sequence && app.state.sequence.state === "running");
 }
 
 export function viewerNotice(app, text) {
@@ -188,6 +193,7 @@ export function runPage(root, app) {
   page.appendChild(splitter(waves.el, side, { key: "run.main", vertical: false, initial: 0.7, min: 300 }));
   setTab(tab);
   const plot = new LinePlot(plotBox, { xLabel: t("run time (s)"), yLabel: "MB/s" });
+  let plotted = "";                // the MB/s points drawn (run, and how many): drawn again only when a point came
 
   // the boards shown: of the run going (or the last one), else of the configuration
   function boardList() {
@@ -254,9 +260,9 @@ export function runPage(root, app) {
     const when = document.getElementById("check-when");
     if (when) setText(when, C && C.checked_at ? t("boards checked {time} by {who}", { time: new Date(C.checked_at * 1000).toLocaleTimeString(), who: C.by }) + (C.simulator ? ` · ${t("simulated")}` : "") : "");
     const active = app.state.run && app.state.run.active;
-    checkBtn.disabled = !app.can("control") || Boolean(C && C.running) || Boolean(active);
-    checkBtn.title = active ? t("Not during a run: the table shows the boards") : t("Connect to every board of the configuration and read what it is (model, serial, firmware, temperatures)");
-    const seqGoing = Boolean(app.state.sequence && app.state.sequence.state === "running");
+    const seqGoing = sequenceGoing(app);                 // also between two of its runs: the server refuses a check then
+    checkBtn.disabled = !app.can("control") || Boolean(C && C.running) || Boolean(active) || seqGoing;
+    checkBtn.title = active || seqGoing ? t("Not during a run: the table shows the boards") : t("Connect to every board of the configuration and read what it is (model, serial, firmware, temperatures)");
     sendBtn.disabled = !app.can("control") || Boolean(C && C.running) || Boolean(active) || seqGoing;
     sendBtn.title = active || seqGoing ? t("Not during a run: the run sent the configuration to the boards when it started")
                   : t("Reset every board switched on and send it the configuration now, as at the start of a run, without taking data");
@@ -268,13 +274,16 @@ export function runPage(root, app) {
     const last = r && !r.active ? r.last : null;
     const shown = active ? r : last;
     const control = app.can("control");
-    const seqGoing = Boolean(app.state.sequence && app.state.sequence.state === "running");
-    startBtn.disabled = !control || active || seqGoing;           // between two runs of a sequence too
+    const seqGoing = sequenceGoing(app);
+    const checking = Boolean(app.state.boards && app.state.boards.running);    // a board check has the boards
+    startBtn.disabled = !control || active || seqGoing || checking;           // between two runs of a sequence too
+    startBtn.title = checking ? t("checking…") : "";
     stopBtn.disabled = !control || !active || Boolean(r.stop_sent_at);
-    const killOk = active && r.stop_sent_at && (Date.now() / 1000 - r.stop_sent_at) > r.kill_after_s;
+    const killOk = active && r.stop_sent_at && (app.serverNow() - r.stop_sent_at) > r.kill_after_s;   // the server's seconds
     killBtn.disabled = !control || !killOk;
-    const seq = app.state.sequence, seqOn = Boolean(seq && seq.state === "running");
-    seqBtn.disabled = !control || active || seqOn;
+    const seq = app.state.sequence;
+    seqBtn.disabled = !control || active || seqGoing || checking;
+    seqBtn.title = checking ? t("checking…") : t("Runs one after the other: N repeats, or a scan of a threshold, a DC offset or any parameter");
     showSequence(seq);
     const targets = (active && r.force_targets) || [];
     forceBtn.disabled = !control || !active || r.phase !== "running" || !targets.length || Boolean(r.stop_sent_at);
@@ -315,10 +324,11 @@ export function runPage(root, app) {
     // the boards
     const states = shown && shown.boards ? shown.boards : [];
     const match = shown ? shown.matching : null;
-    const lag = active && shown.now ? Math.max(0, Date.now() / 1000 - shown.now) : 0;
+    const lag = active && shown.now ? Math.max(0, app.serverNow() - shown.now) : 0;      // since the server said it
     boardEls.forEach((b) => {
       const s = states.find((x) => x.name === b.name);
-      const [led, text] = BOARD_STATES[s ? s.state : "waiting"] || ["", s ? s.state : t("waiting")];
+      const state = s ? s.state || "stopped" : "waiting";       // a run.json read after a server restart has no states
+      const [led, text] = BOARD_STATES[state] || ["", state];
       b.stateLed.className = `led ${led}`;
       setText(b.stateText, t(text) + (s && s.ended && !active ? ` · ${t(s.ended)}` : ""));
       setText(b.ev, s ? fmtInt(s.events) : "—");
@@ -363,7 +373,9 @@ export function runPage(root, app) {
           tile(t("Data"), shown ? fmtBytes(shown.bytes) : "—", shown ? t("{n} files", { n: files.length }) : ""),
           tile(t("Boards"), shown ? String(states.length) : String(boardEls.length),
                shown ? t(shown.sync === "chain" && states.length > 1 ? "clock chain" : states.length > 1 ? "independent boards" : "one board") : ""));
-    plot.setPoints((shown && shown.mbps_series) || []);
+    const series = (shown && shown.mbps_series) || [];
+    const key = `${shown ? shown.run_dir : ""}|${shown ? shown.mbps_version || 0 : 0}|${series.length}`;
+    if (key !== plotted) { plotted = key; plot.setPoints(series); }
   }
 
   function fmtSigned(v) { return `${v > 0 ? "+" : v < 0 ? "−" : ""}${fmtNum(Math.abs(v), Math.abs(v) < 10 ? 1 : 0)}`; }
@@ -472,7 +484,7 @@ export function runPage(root, app) {
   }
 
   function showSequence(seq) {
-    const recent = seq && (seq.state === "running" || Date.now() / 1000 - (seq.ended || 0) < 3600);
+    const recent = seq && (seq.state === "running" || app.serverNow() - (seq.ended || 0) < 3600);
     seqLine.classList.toggle("hidden", !recent);
     if (!recent) return;
     const k = Math.min(seq.index, seq.count - 1), on = seq.state === "running";
@@ -487,8 +499,12 @@ export function runPage(root, app) {
 
   async function sequenceDialog() {
     const cfg = app.state.config.config;
+    let kept = null;                       // the last sequence's settings (this browser): none when storage is off or spoilt
+    try { kept = JSON.parse(store("seq.last") || "null"); } catch (e) { kept = null; }
     const st = { kind: "repeat", count: 5, duration_s: cfg.run.duration_s || 60, target: "threshold", board: "", path: "", values: "50, 100, 150, 200",
-                 runs_per_value: 1, stop_on_failure: true, ...(JSON.parse(localStorage.getItem("vx27.seq.last") || "null") || {}) };
+                 runs_per_value: 1, stop_on_failure: true, ...(kept && typeof kept === "object" && !Array.isArray(kept) ? kept : {}) };
+    if (!["repeat", "scan"].includes(st.kind)) st.kind = "repeat";
+    if (!["threshold", "dc_offset", "param"].includes(st.target)) st.target = "threshold";
     const num = (key, lo, hi, width = "110px") => h("input.input.num", { type: "number", min: String(lo), max: String(hi), value: String(st[key]), style: `width:${width}`,
                                                                        oninput: (e) => { st[key] = Number(e.target.value); } });
     const repeatBox = h("div.form-grid", ...field2(t("runs"), num("count", 1, 1000)));
@@ -499,6 +515,7 @@ export function runPage(root, app) {
     const boardSel = h("select.input", { onchange: () => { st.board = boardSel.value; } },
                        [h("option", { value: "" }, t("every board")), ...cfg.boards.filter((b) => b.enabled).map((b) => h("option", { value: b.name }, b.name))]);
     boardSel.value = st.board;
+    if (boardSel.value !== st.board) { st.board = ""; boardSel.value = ""; }     // renamed or removed since: every board
     const pathIn = h("input.input.mono", { value: st.path, placeholder: "/par/TestPulsePeriod", style: "width:min(300px,100%)", oninput: () => { st.path = pathIn.value.trim(); } });
     const valuesIn = h("input.input", { value: st.values, style: "width:min(360px,100%)", oninput: () => { st.values = valuesIn.value; } });
     const from = h("input.input.num", { type: "number", style: "width:90px", placeholder: t("from") });
@@ -545,7 +562,7 @@ export function runPage(root, app) {
     const go = await dialog({ title: t("Run sequence"), body, wide: true,
                               actions: [{ label: t("Cancel"), value: false }, { label: t("Start the sequence"), kind: "primary", icon: "run",
                                           run: async () => { await post("/api/sequence/start", spec()); return true; } }] });
-    try { localStorage.setItem("vx27.seq.last", JSON.stringify(st)); } catch (e) { /* not kept */ }
+    store("seq.last", JSON.stringify(st));
     if (go) toast(t("The sequence started"), "ok");
   }
 
@@ -591,10 +608,10 @@ export function runPage(root, app) {
         showCheck();
       } else if (type === "log") addLines(msg.lines, false);
       else if (type === "log_reset") addLines([], true);
-      else if (type === "boards") showCheck();
+      else if (type === "boards") { showCheck(); showRun(); }     // a check going holds Start run and Sequence…
       else if (type === "sequence") { showRun(); showCheck(); }
       if (tab === "setup" && (type === "run" || type === "config" || type === "boards")) setup.render();
-      else if (type === "root" || type === "root_done") showRoot();
+      if (type === "root" || type === "root_done") showRoot();
       else if (type === "config" || type === "settings") {
         setText(summary, configSummary(app));
         convert.input.checked = app.state.settings.values.convert_to_root;

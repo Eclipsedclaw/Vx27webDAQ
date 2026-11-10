@@ -2,4 +2,4 @@
 (V2730, V2740, V2745) running the Scope firmware, through CAEN FELib."""
 
 # vMAJOR.MINOR.PATCH: PATCH + 1 for every change, MINOR and MAJOR by hand (version.sh, CHANGELOG.md)
-__version__ = "0.1.26"
+__version__ = "0.1.27"

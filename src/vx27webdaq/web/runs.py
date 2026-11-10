@@ -924,7 +924,8 @@ class RunManager:
     def live_boards(self) -> dict:
         """The boards the live view can show: of the run going ("run"), else of the last run ("last"), else of the
         configuration ("configuration"); per board its channels read out, the channels in its board trigger (none
-        when it takes its trigger on TRG-IN) and its sample time."""
+        when it takes its trigger on TRG-IN), its sample time, and each channel's DC offset and threshold as the run
+        has them (with its changes during the run: where Tune… starts)."""
         a = self.active
         if a is not None:
             cfg, source, run_dir, status = a.cfg, "run", a.run_dir, a.status.get("boards", [])
@@ -946,7 +947,8 @@ class RunManager:
                         "read_out": [c for c, ch in enumerate(b.channels) if ch.enabled],
                         "in_trigger": [c for c, ch in enumerate(b.channels)
                                        if own and ch.enabled and ch.self_trigger and ch.itl in groups],
-                        "sample_ns": float(ns)})
+                        "sample_ns": float(ns),
+                        "dc_offset": [ch.dc_offset for ch in b.channels], "threshold": [ch.threshold for ch in b.channels]})
         return {"boards": out, "source": source, "run_dir": run_dir}
 
     def live_waveforms(self, board: str, channels: list[int], x0: int, x1: int | None, bins: int,
