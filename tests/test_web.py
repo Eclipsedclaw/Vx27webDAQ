@@ -263,7 +263,7 @@ class RunTests(WebTestCase):
         r = await self.client.post("/api/run/control", json={"cmd": "swtrigger"}, headers=CHANGE)
         self.assertEqual((r.status, (await r.json())["boards"]), (200, ["b0", "b1"]))
         r = await self.client.post("/api/run/control", json={"cmd": "set", "board": "b1", "channel": 2, "what": "threshold",
-                                                           "value": 150, "keep": True}, headers=CHANGE)
+                                                           "value": -150, "keep": True}, headers=CHANGE)
         res = await r.json()
         self.assertEqual((r.status, res["ok"], res["value"], res["kept"]), (200, True, "-150", True))
         self.assertEqual(self.station.cfg.board("b1").channels[2].threshold, 150)        # kept for the next runs

@@ -1054,7 +1054,7 @@ class FakeRunTests(FixTestCase):
         a.cfg.board("b0").channels[2].dc_offset, a.cfg.board("b0").channels[2].threshold = 33.5, 777
         res = await (await self.client.get("/api/live/boards")).json()
         b0 = res["boards"][0]
-        self.assertEqual((len(b0["dc_offset"]), len(b0["threshold"]), b0["dc_offset"][2], b0["threshold"][2]), (64, 64, 33.5, 777))
+        self.assertEqual((len(b0["dc_offset"]), len(b0["threshold"]), b0["dc_offset"][2], b0["threshold"][2]), (64, 64, 33.5, -777))
         self.assertNotEqual(self.station.cfg.board("b0").channels[2].threshold, 777)
         self.station.runs.active = None
 
@@ -1071,6 +1071,29 @@ class FakeRunTests(FixTestCase):
             os.utime(os.path.join(d, "run.json"), (mtime, mtime))
         self.station.runs.load_last()
         self.assertEqual(os.path.basename(self.station.runs.last["run_dir"]), "20261109_100000")
+
+    async def test_signed_thresholds(self):
+        """Thresholds as the board gets them (negative for negative pulses, like CAEN's TriggerThr): the live boards
+        give them so, a change during the run in the other direction is refused before anything goes to the DAQ
+        program, and a threshold scan takes signed values (the sign is the pulse direction)."""
+        await self.login("oper1")
+        a = self.fake_run()
+        a.cfg = C.from_dict(C.to_dict(a.cfg))
+        a.cfg.board("b0").channels[1].positive, a.cfg.board("b0").channels[1].threshold = True, 55
+        b0 = (await (await self.client.get("/api/live/boards")).json())["boards"][0]
+        self.assertEqual(b0["threshold"][:2], [-a.cfg.board("b0").channels[0].threshold, 55])
+        for channel, value in ((0, 120), (1, -120)):
+            r = await self.client.post("/api/run/control", json={"cmd": "set", "board": "b0", "channel": channel,
+                                                               "what": "threshold", "value": value}, headers=CHANGE)
+            self.assertEqual(r.status, 400, (channel, value))
+            self.assertIn("pulse direction", await r.text())
+        self.assertEqual(os.listdir(a.path("control")), [])               # nothing went to the DAQ program
+        self.station.runs.active = None
+        labels, cfgs = self.station.sequence.plan({"kind": "scan", "target": "threshold", "board": "b1",
+                                                   "values": "-40, 90, 0", "duration_s": 1})
+        self.assertEqual(labels, ["threshold = -40 on b1", "threshold = 90 on b1", "threshold = 0 on b1"])
+        self.assertEqual([(c.board("b1").channels[3].threshold, c.board("b1").channels[3].positive) for c in cfgs],
+                         [(40, False), (90, True), (0, self.station.cfg.board("b1").channels[3].positive)])
 
     def test_plan_checks_each_configuration_once(self):
         """R20: a sequence of 1000 repeats is checked once, not 1000 times."""
@@ -1234,7 +1257,7 @@ class RestartDuringRunTests(FixTestCase):
             return (await self.run_state()).get("phase") == "running"
         await self.wait(running, 15, "the run to go")
         r = await self.client.post("/api/run/control", json={"cmd": "set", "board": "b1", "channel": 2, "what": "threshold",
-                                                           "value": 150, "keep": False}, headers=CHANGE)
+                                                           "value": -150, "keep": False}, headers=CHANGE)
         self.assertEqual(r.status, 200, await r.text())
         await asyncio.sleep(1)                                           # into status.json
         await self.client.close()

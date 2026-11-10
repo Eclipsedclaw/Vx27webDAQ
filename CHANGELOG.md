@@ -5,6 +5,10 @@ What changed in each version of Vx27webDAQ (ALAB DAQ until v0.0.18). Write the n
 
 ## Unreleased
 
+## v0.1.30 (2026-11-10)
+
+- Negative thresholds, as CAEN's TriggerThr: every threshold of the page is shown and typed as the board gets it, counts from the baseline, negative for negative pulses (e.g. −100 for a SiPM, falling edge), positive for positive ones (rising edge). The sign is the pulse direction: a negative number unticks *positive*, ticking it flips the sign. This holds on the Configuration page (Trigger panel and *same for all*, Channels table and its *all channels* row, Set all thresholds…), in Tune… during a run (only the run's direction: the edge does not change during a run; the server refuses the other sign) and in threshold scans (e.g. −50, −100, …). Before, a negative number was refused ("from 0 to 65535") although the board got −N for negative pulses. The configuration files keep the size and the direction apart (`threshold`, `positive`), so older files and run records mean the same; `/api/run/control` and `/api/live/boards` now take and give the signed number.
+
 ## v0.1.29 (2026-11-10)
 
 - Documents for the system test fixes: the READMEs say what changed: event building by time, the stop, the board lock, versioned configuration edits, what Save refuses, the CAEN library folder (admins), data folders and conversions, the sign-in rules. The main README's "If something goes wrong" has two more rows.

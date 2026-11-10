@@ -240,7 +240,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual([(x["/par/AcqTriggerSource"], x["/par/TrgOutMode"]) for x in v],
                          [("ITLA", "ITLA"), ("TrgIn", "TrgIn"), ("TrgIn", "Disabled")])
         self.assertEqual(C.force_targets(cfg), [])        # ITLA on TRG-OUT: a forced trigger would reach only the master
-        self.assertEqual(C.live_setting(cfg.boards[0], 3, "threshold", 80), ("/ch/3/par/TriggerThr", "-80"))
+        self.assertEqual(C.live_setting(cfg.boards[0], 3, "threshold", -80), ("/ch/3/par/TriggerThr", "-80"))
         self.assertEqual(C.live_setting(cfg.boards[0], 3, "dc_offset", 61.25), ("/ch/3/par/DCOffset", "61.25"))
         with self.assertRaises(C.ConfigError):
             C.live_setting(cfg.boards[0], 16, "threshold", 80)       # a VX2730 of 16 inputs
@@ -260,6 +260,37 @@ class ConfigTests(unittest.TestCase):
         d["boards"][0]["n_channels"] = 65
         with self.assertRaises(C.ConfigError):
             C.from_dict(d)
+
+    def test_signed_thresholds(self):
+        """A threshold as the board gets it (negative for negative pulses, as CAEN's TriggerThr): its sign is the pulse
+        direction, 0 keeps the direction; during a run only the direction the run has is taken (SelfTriggerEdge does
+        not change then)."""
+        ch = C.Channel()                                                 # negative pulses by default
+        self.assertEqual((ch.threshold, ch.positive, C.signed_threshold(ch)), (100, False, -100))
+        C.set_signed_threshold(ch, 250)
+        self.assertEqual((ch.threshold, ch.positive, C.signed_threshold(ch)), (250, True, 250))
+        C.set_signed_threshold(ch, 0)
+        self.assertEqual((ch.threshold, ch.positive), (0, True))         # 0: the direction stays
+        C.set_signed_threshold(ch, -40)
+        self.assertEqual((ch.threshold, ch.positive, C.signed_threshold(ch)), (40, False, -40))
+        b = C.Board("b0", "dig2://10.0.0.1", "V2730", channels=C.channels_for("V2730"))
+        b.channels[1].positive = True
+        self.assertEqual(C.live_setting(b, 0, "threshold", -150), ("/ch/0/par/TriggerThr", "-150"))
+        self.assertEqual(C.live_setting(b, 1, "threshold", 150), ("/ch/1/par/TriggerThr", "150"))
+        self.assertEqual(C.live_setting(b, 0, "threshold", 0), ("/ch/0/par/TriggerThr", "0"))
+        for c, v in ((0, 150), (1, -150), (0, -65536), (0, -10.5)):    # the other direction, too far, not whole
+            with self.assertRaises(C.ConfigError, msg=(c, v)):
+                C.live_setting(b, c, "threshold", v)
+        b.channels[2].positive, b.channels[2].threshold = True, 30
+        v = self.values(self.one_board(b), 0)                            # what the board gets: the signed number
+        self.assertEqual((v["/ch/0/par/TriggerThr"], v["/ch/1/par/TriggerThr"], v["/ch/2/par/TriggerThr"],
+                          v["/ch/0/par/SelfTriggerEdge"], v["/ch/1..2/par/SelfTriggerEdge"]), ("-100", "100", "30", "Fall", "Rise"))
+
+    def one_board(self, b):
+        cfg = C.default_config()
+        cfg.boards = [b]
+        cfg.trigger.setup = "self"
+        return cfg
 
     def test_models(self):
         self.assertEqual(models.family("VX2740"), "2740")

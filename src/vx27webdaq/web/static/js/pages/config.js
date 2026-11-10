@@ -34,6 +34,14 @@ const DAC_TEXT = { Static: T("a fixed level"), Ramp: T("a ramp over the ADC rang
 // ---- this page's edits onto someone else's (a 409 conflict): what changed here since `base`, field by field ----
 function clone(x) { return JSON.parse(JSON.stringify(x)); }
 
+// a threshold as the board gets it (TriggerThr, ADC counts from the baseline): negative for negative pulses. The
+// configuration keeps its size and the pulse direction (positive): a sign typed sets the direction, 0 keeps it
+const THR_MAX = 65535;
+const signedThr = (x) => (x.positive ? x.threshold : -x.threshold);
+function setSignedThr(x, v) { x.threshold = Math.abs(v); if (v) x.positive = v > 0; }
+const thrOk = (v) => Number.isInteger(v) && Math.abs(v) <= THR_MAX;
+const thrError = () => t("The threshold must be a whole number from {lo} to {hi}", { lo: -THR_MAX, hi: THR_MAX });
+
 function same(a, b) {                       // deep equality of JSON values, whatever the order of the keys
   if (a === b) return true;
   if (typeof a !== "object" || typeof b !== "object" || a === null || b === null || Array.isArray(a) !== Array.isArray(b)) return false;
@@ -568,7 +576,8 @@ export function configPage(root, app) {
       el.classList.toggle("dim", !x.enabled);
       el.title = !x.enabled ? t("ch{c}: not read out, so it does not trigger", { c: k }) : t("ch{c}: click to put it in the board trigger or take it out", { c: k });
     });
-    form.querySelectorAll(`[data-thr="${i}:${k}"]`).forEach((el) => { if (el !== skip) el.value = String(x.threshold); });
+    form.querySelectorAll(`[data-thr="${i}:${k}"]`).forEach((el) => { if (el !== skip) el.value = String(signedThr(x)); });
+    form.querySelectorAll(`[data-pos="${i}:${k}"]`).forEach((el) => { el.checked = Boolean(x.positive); });
     showSummaries(i);
   }
 
@@ -591,7 +600,7 @@ export function configPage(root, app) {
 
   function trigSummary(b) {
     const mask = b.channels.filter((x) => x.self_trigger && x.enabled);
-    const thr = mask.map((x) => x.threshold);
+    const thr = mask.map(signedThr);
     const range = !thr.length ? t("no channel in the mask") : Math.min(...thr) === Math.max(...thr)
       ? t("threshold {t} counts", { t: thr[0] }) : t("thresholds {a} to {b} counts", { a: Math.min(...thr), b: Math.max(...thr) });
     return t("{k} of {n} channels in the mask", { k: mask.length, n: b.channels.length }) + ` · ${range}`;
@@ -619,13 +628,14 @@ export function configPage(root, app) {
       return b2;
     }));
     maskGrid.style.setProperty("--cols", Math.min(16, ch.length));
-    const same = h("input.input.num", { type: "number", min: "0", max: "65535", disabled: !can, style: "width:90px",
-                                        value: String((ch.find((x) => x.self_trigger) || ch[0] || {}).threshold ?? 100), "aria-label": t("same threshold for all") });
+    const first = ch.find((x) => x.self_trigger) || ch[0];
+    const same = h("input.input.num", { type: "number", min: String(-THR_MAX), max: String(THR_MAX), disabled: !can, style: "width:90px",
+                                        value: String(first ? signedThr(first) : -100), "aria-label": t("same threshold for all") });
     const thrGrid = h("div.thr-grid", ch.map((x, c) => {
-      const el = h("input.input.num", { type: "number", min: "0", max: "65535", value: String(x.threshold), disabled: !can,
+      const el = h("input.input.num", { type: "number", min: String(-THR_MAX), max: String(THR_MAX), value: String(signedThr(x)), disabled: !can,
                                         "aria-label": t("threshold of ch{c}", { c }), dataset: { thr: `${i}:${c}` },
-                                        oninput: () => { const v = Math.round(Number(el.value)); if (el.value !== "" && Number.isFinite(v) && v >= 0) {
-                                          x.threshold = v; edited(); syncChannel(i, c, el); } } });
+                                        oninput: () => { const v = Math.round(Number(el.value)); if (el.value !== "" && thrOk(v)) {
+                                          setSignedThr(x, v); edited(); syncChannel(i, c, el); } } });
       return h("label.thr-cell", h("span.small", `ch${c}`), el);
     }));
     box.append(h("div.stack.cfg-trig-body",
@@ -636,15 +646,15 @@ export function configPage(root, app) {
         btn(t("Read out only"), t("The channels that are read out"), (x) => { x.self_trigger = x.enabled; })),
       maskGrid,
       h("div.row.wrap", h("b.small", t("Thresholds")),
-        h("span.hint", t("ADC counts from each channel's baseline, in the direction of its pulses (Channels: positive)")), h("span.spacer"),
+        h("span.hint", t("ADC counts from each channel's baseline, as the board gets them: negative for negative pulses (falling edge), positive for positive ones (rising edge)")), h("span.spacer"),
         h("span.label", t("same for all")), same,
         h("button.btn.btn-sm", { type: "button", disabled: !can, onclick: () => {
           const v = Math.round(Number(same.value));          // an emptied field is not 0
-          if (same.value.trim() === "" || !Number.isFinite(v) || v < 0 || v > 65535) {
-            toast(t("The threshold must be a whole number from {lo} to {hi}", { lo: 0, hi: 65535 }), "error");
+          if (same.value.trim() === "" || !thrOk(v)) {
+            toast(thrError(), "error");
             return;
           }
-          all((x) => { x.threshold = v; });
+          all((x) => setSignedThr(x, v));
         } }, t("Set"))),
       thrGrid));
     return box;
@@ -702,7 +712,7 @@ export function configPage(root, app) {
     const touched = new Set();
     const every = (key) => chs.length > 0 && chs.every((x) => Boolean(x[key]));
     const mixed = (key) => chs.some((x) => Boolean(x[key])) && !every(key);
-    const one = (key) => (chs.length && chs.every((x) => x[key] === chs[0][key]) ? String(chs[0][key]) : "");
+    const one = (key, of = (x) => x[key]) => (chs.length && chs.every((x) => of(x) === of(chs[0])) ? String(of(chs[0])) : "");
     const touch = (key) => () => { touched.add(key); apply.disabled = !can; };
     const tick = (key, label) => {
       const el = h("input", { type: "checkbox", checked: every(key), disabled: !can, "aria-label": label, onchange: touch(key) });
@@ -712,9 +722,17 @@ export function configPage(root, app) {
     const allOn = tick("enabled", t("read out"));
     const allDc = h("input.input.num", { type: "number", min: "0", max: "100", step: "0.1", value: one("dc_offset"), disabled: !can, style: "width:80px",
                                          "aria-label": t("DC offset"), oninput: touch("dc_offset") });
-    const allThr = h("input.input.num", { type: "number", min: "0", max: "65535", value: one("threshold"), disabled: !can, style: "width:90px",
-                                          "aria-label": t("threshold"), oninput: touch("threshold") });
+    const allThr = h("input.input.num", { type: "number", min: String(-THR_MAX), max: String(THR_MAX), value: one("threshold", signedThr),
+                                          disabled: !can, style: "width:90px", "aria-label": t("threshold"), oninput: () => {
+      touch("threshold")();
+      const v = Number(allThr.value);                  // a sign typed is the pulse direction: the box follows
+      if (allThr.value !== "" && v) { allPos.checked = v > 0; allPos.indeterminate = false; touched.add("positive"); }
+    } });
     const allPos = tick("positive", t("positive pulses"));
+    allPos.addEventListener("change", () => {          // and the sign follows the box
+      const v = Number(allThr.value);
+      if (allThr.value !== "" && Number.isFinite(v)) allThr.value = String((allPos.checked ? 1 : -1) * Math.abs(v));
+    });
     const allTrig = tick("self_trigger", t("in trigger"));
     const apply = h("button.btn.btn-sm", { type: "button", disabled: true, onclick: () => {
       const dc = Number(allDc.value), thr = Math.round(Number(allThr.value));
@@ -722,15 +740,15 @@ export function configPage(root, app) {
         toast(t("The DC offset must be from {lo} to {hi} %", { lo: 0, hi: 100 }), "error");
         return;
       }
-      if (touched.has("threshold") && (allThr.value.trim() === "" || !(thr >= 0 && thr <= 65535))) {
-        toast(t("The threshold must be a whole number from {lo} to {hi}", { lo: 0, hi: 65535 }), "error");
+      if (touched.has("threshold") && (allThr.value.trim() === "" || !thrOk(thr))) {
+        toast(thrError(), "error");
         return;
       }
       for (const ch of chs) {
         if (touched.has("enabled")) ch.enabled = allOn.checked;
         if (touched.has("dc_offset")) ch.dc_offset = dc;
-        if (touched.has("threshold")) ch.threshold = thr;
         if (touched.has("positive")) ch.positive = allPos.checked;
+        if (touched.has("threshold")) setSignedThr(ch, thr);
         if (self && touched.has("self_trigger")) ch.self_trigger = allTrig.checked;
       }
       edited(true);
@@ -742,8 +760,8 @@ export function configPage(root, app) {
                       self ? h("label.row.nowrap", allTrig, t("in trigger")) : null, apply));
     const head = h("tr", h("th", t("ch")), h("th", t("read out")),
                    h("th", { title: t("Where the baseline sits, in % of the input range: 50 % in the middle; for negative pulses a high value leaves room below") }, t("DC offset %")),
-                   h("th", { title: t("ADC counts from the channel's baseline, in the direction of its pulses (not an ADC level)") }, t("threshold")),
-                   h("th", { title: t("Ticked: positive pulses (rising edge, above the baseline); else negative pulses") }, t("positive")),
+                   h("th", { title: t("ADC counts from the channel's baseline, as the board gets them (not an ADC level): negative for negative pulses") }, t("threshold")),
+                   h("th", { title: t("Ticked: positive pulses (rising edge, above the baseline); else negative pulses (falling edge, below it). The threshold's sign goes with it") }, t("positive")),
                    self ? h("th", { title: t("Takes part in the board's trigger (the channel logic of the Trigger section)") }, t("in trigger")) : null,
                    self && groups ? h("th", { title: t("The channel logic it joins: A (ITLA) or B (ITLB)") }, t("group")) : null,
                    info.gain ? h("th", t("gain dB")) : null);
@@ -751,13 +769,13 @@ export function configPage(root, app) {
       const w = `boards[${i}].channels[${k}]`;
       const cb = (key, label) => {
         const el = h("input", { type: "checkbox", checked: Boolean(ch[key]), disabled: !can, "aria-label": `${label} ch${k}`,
-                                dataset: key === "self_trigger" ? { mask: `${i}:${k}` } : undefined,
+                                dataset: key === "self_trigger" ? { mask: `${i}:${k}` } : key === "positive" ? { pos: `${i}:${k}` } : undefined,
                                 onchange: () => { ch[key] = el.checked; edited(); syncChannel(i, k); } });
         return h("td", el);
       };
       return h("tr", h("th.rowh", String(k)), cb("enabled", t("read out")),
                h("td", number(() => ch.dc_offset, (v) => { ch.dc_offset = v; }, `${w}.dc_offset`, { lo: 0, hi: 100, step: 0.1, float: true, width: "80px" })),
-               h("td", syncedThreshold(number(() => ch.threshold, (v) => { ch.threshold = v; }, `${w}.threshold`, { lo: 0, hi: 65535, width: "90px" }), i, k)),
+               h("td", syncedThreshold(number(() => signedThr(ch), (v) => setSignedThr(ch, v), `${w}.threshold`, { lo: -THR_MAX, hi: THR_MAX, width: "90px" }), i, k)),
                cb("positive", t("positive")), self ? cb("self_trigger", t("in trigger")) : null,
                self && groups ? h("td", select([["A", "A"], ["B", "B"]], () => ch.itl || "A", (v) => { ch.itl = v; }, `${w}.itl`, false)) : null,
                info.gain ? h("td", number(() => ch.gain, (v) => { ch.gain = v; }, `${w}.gain`, { lo: 0, hi: 40, step: 0.5, float: true, width: "80px" })) : null);
@@ -875,27 +893,33 @@ export function configPage(root, app) {
   }
 
   async function setAllThresholds() {
-    const input = h("input.input.num", { type: "number", min: "0", max: "65535", value: "100" });
-    const pos = h("input", { type: "checkbox" });
+    const first = (model.boards.find((b) => b.channels.length) || { channels: [] }).channels[0];
+    const input = h("input.input.num", { type: "number", min: String(-THR_MAX), max: String(THR_MAX), value: String(first ? signedThr(first) : -100) });
+    const pos = h("input", { type: "checkbox", checked: Boolean(first && first.positive) });
     let submit = null;
     input.addEventListener("keydown", (e) => { if (e.key === "Enter" && submit) submit.click(); });
+    input.addEventListener("input", () => { const v = Number(input.value); if (input.value !== "" && v) pos.checked = v > 0; });
+    pos.addEventListener("change", () => {             // the sign is the pulse direction
+      const v = Number(input.value);
+      if (input.value !== "" && Number.isFinite(v)) input.value = String((pos.checked ? 1 : -1) * Math.abs(v));
+    });
     const total = model.boards.reduce((a, b) => a + b.channels.length, 0);
     const value = await dialog({
       title: t("Threshold for every channel"),
       body: h("div.stack",
               h("p", { style: "margin:0" }, t("The same threshold and pulse direction for all {c} channels of all {n} boards; each channel can still be changed afterwards.", { c: total, n: model.boards.length })),
-              h("div.field", h("label", t("Threshold in ADC counts from each channel's own baseline, in the direction of the pulse (not an ADC level)")), input),
+              h("div.field", h("label", t("Threshold in ADC counts from each channel's own baseline, as the board gets it (not an ADC level): negative for negative pulses, e.g. -100")), input),
               h("label.row.nowrap", pos, t("positive pulses (else negative)"))),
       actions: [{ label: t("Cancel"), value: null },
                 { label: t("Apply to all boards"), kind: "primary", run: () => {
                   const v = Number(input.value);                 // an emptied field is not 0
-                  if (input.value.trim() === "" || !Number.isInteger(v) || v < 0 || v > 65535) throw new Error(t("The threshold must be a whole number from {lo} to {hi}", { lo: 0, hi: 65535 }));
+                  if (input.value.trim() === "" || !thrOk(v)) throw new Error(thrError());
                   return v;
                 } }],
       onOpen: (m) => { submit = m.querySelector(".btn-primary"); input.select(); },
     });
     if (value === null || value === undefined) return;
-    for (const b of model.boards) for (const ch of b.channels) { ch.threshold = value; ch.positive = pos.checked; }
+    for (const b of model.boards) for (const ch of b.channels) { ch.positive = pos.checked; setSignedThr(ch, value); }
     edited(true);
     build();
     toast(t("Threshold {v} on all {c} channels", { v: value, c: total }), "ok");

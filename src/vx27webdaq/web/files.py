@@ -243,7 +243,7 @@ def board_lines(cfg: C.DaqConfig | None, board: C.Board | None, status: dict | N
     n = len(board.channels) if board else int(src.get("channels") or m.channels)
     for c in range(n):
         ch = board.channels[c] if board and c < len(board.channels) else None
-        thr = None if ch is None else (ch.threshold if ch.positive else -ch.threshold)
+        thr = None if ch is None else C.signed_threshold(ch)
         lines.append({"trigger_at": pre, "threshold": thr, "threshold_used": used and bool(ch and ch.self_trigger)})
     return {"record_length": int(rec or 0), "pre_trigger": pre, "sample_ns": float(sns), "adc_max": (1 << int(bits)) - 1,
             "model": src.get("model") or (board.model if board else m.text), "lines": lines}

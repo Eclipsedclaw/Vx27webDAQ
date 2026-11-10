@@ -501,7 +501,10 @@ export function runPage(root, app) {
     const cfg = app.state.config.config;
     let kept = null;                       // the last sequence's settings (this browser): none when storage is off or spoilt
     try { kept = JSON.parse(store("seq.last") || "null"); } catch (e) { kept = null; }
-    const st = { kind: "repeat", count: 5, duration_s: cfg.run.duration_s || 60, target: "threshold", board: "", path: "", values: "50, 100, 150, 200",
+    const firstCh = ((cfg.boards.find((b) => b.enabled) || {}).channels || [])[0];      // thresholds as the board gets
+    const sg = firstCh && firstCh.positive ? 1 : -1;                                     // them: negative for negative pulses
+    const st = { kind: "repeat", count: 5, duration_s: cfg.run.duration_s || 60, target: "threshold", board: "", path: "",
+                 values: [50, 100, 150, 200].map((v) => v * sg).join(", "),
                  runs_per_value: 1, stop_on_failure: true, ...(kept && typeof kept === "object" && !Array.isArray(kept) ? kept : {}) };
     if (!["repeat", "scan"].includes(st.kind)) st.kind = "repeat";
     if (!["threshold", "dc_offset", "param"].includes(st.target)) st.target = "threshold";
@@ -509,7 +512,7 @@ export function runPage(root, app) {
                                                                        oninput: (e) => { st[key] = Number(e.target.value); } });
     const repeatBox = h("div.form-grid", ...field2(t("runs"), num("count", 1, 1000)));
     const targetSel = h("select.input", { onchange: () => { st.target = targetSel.value; showKind(); } },
-                        [["threshold", t("threshold of every channel (ADC counts)")], ["dc_offset", t("DC offset of every channel (%)")], ["param", t("a board parameter")]]
+                        [["threshold", t("threshold of every channel (ADC counts from the baseline, negative for negative pulses)")], ["dc_offset", t("DC offset of every channel (%)")], ["param", t("a board parameter")]]
                           .map(([v, l]) => h("option", { value: v }, l)));
     targetSel.value = st.target;
     const boardSel = h("select.input", { onchange: () => { st.board = boardSel.value; } },

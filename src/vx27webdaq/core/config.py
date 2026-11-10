@@ -23,9 +23,11 @@ The trigger setups: the lab's usual one (master), the three multi-board examples
                output comes back into every TRG-IN; every board takes the common trigger
     periodic   software triggers from the DAQ (each board, or the master passing them on TRG-OUT -> TRG-IN), or
                each board's internal test pulse
-Thresholds count from the channel's baseline (TriggerThrMode = Relative), in the pulse's direction: a
-negative pulse gets TriggerThr = -N and SelfTriggerEdge = Fall. Vx27webDAQ sends that convention; it is to be
-confirmed on the real boards (WaveDump2 shows relative thresholds below the baseline as negative numbers).
+Thresholds count from the channel's baseline (TriggerThrMode = Relative): a negative pulse gets TriggerThr = -N
+and SelfTriggerEdge = Fall, a positive one +N and Rise (WaveDump2 shows relative thresholds below the baseline as
+negative numbers; to be confirmed on the real boards). A configuration keeps the size N (threshold) and the pulse
+direction (positive) apart; the page, Tune… and the threshold scans take the signed number the board gets, whose
+sign is the pulse direction (signed_threshold, set_signed_threshold).
 """
 
 from __future__ import annotations
@@ -84,11 +86,23 @@ class ConfigError(ValueError):
 class Channel:
     enabled: bool = True
     dc_offset: float = 50.0     # where the baseline sits, in % of the input range (0-100)
-    threshold: int = 100        # ADC counts from the baseline, in the direction of the pulse
+    threshold: int = 100        # ADC counts from the baseline, its size (the board gets -N for negative pulses)
     positive: bool = False      # positive pulses (rising edge, above the baseline); else negative
     self_trigger: bool = True   # takes part in the board's channel trigger
     itl: str = "A"              # which channel logic it joins: A (ITLA) or B (ITLB)
     gain: float = 0.0           # dB, 2745 only
+
+
+def signed_threshold(ch: Channel) -> int:
+    """The threshold as the board gets it (TriggerThr, counts from the baseline): negative for negative pulses."""
+    return ch.threshold if ch.positive else -ch.threshold
+
+
+def set_signed_threshold(ch: Channel, value: int) -> None:
+    """A threshold given as the board gets it: its size, and its sign as the pulse direction (0 keeps the direction)."""
+    ch.threshold = abs(int(value))
+    if value:
+        ch.positive = value > 0
 
 
 @dataclass
@@ -569,7 +583,7 @@ def plan(cfg: DaqConfig, k: int, facts: models.Model | None = None) -> list[Sett
             put(_ch(a, z, "ChGain"), v, "gain (dB)")
     if own:
         put(_ch(0, len(ch) - 1, "TriggerThrMode"), "Relative", "thresholds from the baseline")
-        for a, z, v in _ranges([(-1 if not c.positive else 1) * c.threshold for c in ch]):
+        for a, z, v in _ranges([signed_threshold(c) for c in ch]):
             put(_ch(a, z, "TriggerThr"), v, "threshold (counts from the baseline)")
         for a, z, v in _ranges(["Rise" if c.positive else "Fall" for c in ch]):
             put(_ch(a, z, "SelfTriggerEdge"), v, "positive pulses" if v == "Rise" else "negative pulses")
@@ -619,10 +633,14 @@ def live_setting(board: Board, channel: int, what: str, value: float) -> tuple[s
         if not 0 <= value <= 100:
             raise ConfigError("a DC offset is from 0 to 100 %")
         return f"/ch/{channel}/par/DCOffset", str(round(float(value), 3))
-    if what == "threshold":
-        if not 0 <= value <= 65535 or value != int(value):
-            raise ConfigError("a threshold is a whole number of ADC counts from 0")
-        return f"/ch/{channel}/par/TriggerThr", str(int(value) if ch.positive else -int(value))
+    if what == "threshold":                       # as the board gets it: negative for negative pulses
+        if not -65535 <= value <= 65535 or value != int(value):
+            raise ConfigError("a threshold is a whole number of ADC counts from the baseline, from -65535 to 65535")
+        if value and (value > 0) != ch.positive:  # SelfTriggerEdge does not change during a run
+            raise ConfigError(f"{board.name} ch{channel} takes {'positive' if ch.positive else 'negative'} pulses in this run: "
+                              f"its threshold is {'0 or more' if ch.positive else '0 or less'} (the pulse direction "
+                              "does not change during a run)")
+        return f"/ch/{channel}/par/TriggerThr", str(int(value))
     raise ConfigError(f"{what}: only dc_offset and threshold change during a run")
 
 

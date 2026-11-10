@@ -437,7 +437,8 @@ class RunManager:
                                "have been made)")
         if cmd == "set" and res.get("ok"):
             attr = "dc_offset" if req["path"].endswith("DCOffset") else "threshold"
-            new = round(value, 3) if attr == "dc_offset" else int(value)
+            new = round(value, 3) if attr == "dc_offset" else abs(int(value))     # a threshold's size: its sign is
+            shown = new if attr == "dc_offset" else int(value)                     # the channel's pulse direction
             setattr(a.cfg.board(name).channels[channel], attr, new)
             st, keep = self.station, bool(data.get("keep", True))
             sb = st.cfg.board(name)
@@ -446,7 +447,7 @@ class RunManager:
                 st.cfg_dirty = True
                 st.config_changed()
             res["kept"] = keep
-            self.station.activity(user, "changed during the run", f"{name} ch{channel} {attr} = {new}")
+            self.station.activity(user, "changed during the run", f"{name} ch{channel} {attr} = {shown}")
             self.live_seq += 1
         elif cmd == "swtrigger":
             self.station.activity(user, "Force trigger", res.get("message", ""))
@@ -925,7 +926,8 @@ class RunManager:
         """The boards the live view can show: of the run going ("run"), else of the last run ("last"), else of the
         configuration ("configuration"); per board its channels read out, the channels in its board trigger (none
         when it takes its trigger on TRG-IN), its sample time, and each channel's DC offset and threshold as the run
-        has them (with its changes during the run: where Tune… starts)."""
+        has them (with its changes during the run: where Tune… starts; a threshold as the board gets it, negative
+        for negative pulses)."""
         a = self.active
         if a is not None:
             cfg, source, run_dir, status = a.cfg, "run", a.run_dir, a.status.get("boards", [])
@@ -948,7 +950,8 @@ class RunManager:
                         "in_trigger": [c for c, ch in enumerate(b.channels)
                                        if own and ch.enabled and ch.self_trigger and ch.itl in groups],
                         "sample_ns": float(ns),
-                        "dc_offset": [ch.dc_offset for ch in b.channels], "threshold": [ch.threshold for ch in b.channels]})
+                        "dc_offset": [ch.dc_offset for ch in b.channels],
+                        "threshold": [C.signed_threshold(ch) for ch in b.channels]})
         return {"boards": out, "source": source, "run_dir": run_dir}
 
     def live_waveforms(self, board: str, channels: list[int], x0: int, x1: int | None, bins: int,

@@ -41,7 +41,7 @@ With channel triggers the **board trigger** is logic A (ITLA), logic B (ITLB), A
 
 The **sync check** (Progress tab) compares the boards' timestamps per trigger ID only when one trigger reaches every board on the clock chain; boards on their own clocks have no common time (*independent boards: no common clock*). An ID that a board sends late is counted as late, not missing.
 
-**Thresholds** count from the channel's own baseline in ADC counts, in the direction of the pulse: TriggerThrMode Relative, TriggerThr −N with SelfTriggerEdge Fall for negative pulses, +N with Rise for positive ones. **DC offset** is where the baseline sits in % of the input range (for negative pulses a high value leaves room below).
+**Thresholds** count from the channel's own baseline in ADC counts (TriggerThrMode Relative), and the page shows and takes them as the board gets them: TriggerThr −N with SelfTriggerEdge Fall for negative pulses (e.g. −100 for a SiPM), +N with Rise for positive ones. The sign is the pulse direction: typing −100 unticks *positive*, ticking *positive* makes it +100; during a run (Tune…) only the run's direction is taken. The configuration file keeps the size (`threshold`, 0 or more) and the direction (`positive`) apart, so older files mean the same. **DC offset** is where the baseline sits in % of the input range (for negative pulses a high value leaves room below).
 
 ## The lab's boards
 

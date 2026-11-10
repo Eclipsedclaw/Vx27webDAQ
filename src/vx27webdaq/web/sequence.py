@@ -2,7 +2,8 @@
 
     repeat   N runs of the configuration, each of T seconds
     scan     one setting over a list of values, each value for R runs of T seconds:
-             threshold   every channel's threshold (of one board, or of every board), ADC counts
+             threshold   every channel's threshold (of one board, or of every board), ADC counts as the board
+                         gets them: negative for negative pulses (the sign is the pulse direction)
              dc_offset   every channel's DC offset, %
              param       any board parameter (an expert parameter of the configuration: /par/NAME or
                          /ch/N/par/NAME), as text
@@ -127,9 +128,9 @@ class SequenceManager:
             for v in values:
                 cfg = base.copy()
                 for b in [x for x in cfg.boards if x.enabled and (not board or x.name == board)]:
-                    if target == "threshold":
+                    if target == "threshold":           # as the board gets it: the sign is the pulse direction
                         for ch in b.channels:
-                            ch.threshold = int(v)
+                            C.set_signed_threshold(ch, int(v))
                     elif target == "dc_offset":
                         for ch in b.channels:
                             ch.dc_offset = float(v)

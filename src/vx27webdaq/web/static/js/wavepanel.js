@@ -102,7 +102,7 @@ export function wavePanel(app, { onBoard } = {}) {
                                                title: t("A dashed line at the trigger: the pre-trigger sample of the settings the data were taken with") },
                         icon("vdash"), t("Trigger time"));
   const thrLineBtn = h("button.btn.btn-sm", { type: "button", "aria-pressed": "false", onclick: () => setLines({ threshold: !lines.threshold }),
-                                              title: t("A dashed line at each channel's threshold: its baseline − the threshold for negative pulses, + for positive ones; used when the boards trigger on their channels") },
+                                              title: t("A dashed line at each channel's threshold: its baseline plus the threshold (below the baseline for a negative one); used when the boards trigger on their channels") },
                        icon("hdash"), t("Threshold"));
   const mouseSeg = segmented([["zoom", t("Zoom")], ["measure", t("Measure")]], mouse, (v) => setMouse(v), { label: t("Mouse") });
   mouseSeg.title = t("What a drag across a plot does: zoom all plots to that range, or measure that range on all plots. The mouse wheel over a plot zooms the time axis in either mode.");
@@ -113,7 +113,8 @@ export function wavePanel(app, { onBoard } = {}) {
                                           title: t("Change a channel's DC offset or threshold while the run goes") }, icon("sliders"), t("Tune…"));
   const tuneCh = h("select.input", { "aria-label": t("Channel"), onchange: () => fillTune() });
   const tuneDc = h("input.input.num", { type: "number", min: "0", max: "100", step: "0.1", style: "width:90px", "aria-label": t("DC offset") });
-  const tuneThr = h("input.input.num", { type: "number", min: "0", max: "65535", step: "1", style: "width:90px", "aria-label": t("threshold") });
+  const tuneThr = h("input.input.num", { type: "number", min: "-65535", max: "65535", step: "1", style: "width:90px", "aria-label": t("threshold"),
+                                        title: t("ADC counts from each channel's baseline, as the board gets them: negative for negative pulses (falling edge), positive for positive ones (rising edge)") });
   const tuneKeep = h("input", { type: "checkbox", checked: true });
   const tuneMsg = h("span.text2.small");
   const tuneDcBtn = h("button.btn.btn-sm", { type: "button", onclick: () => tuneSet("dc_offset", tuneDc.value) }, t("Set"));
@@ -302,7 +303,7 @@ export function wavePanel(app, { onBoard } = {}) {
     let dc = of("dc_offset"), thr = of("threshold");
     if (thr === null && runThr.has(`${board}|${c}`)) thr = runThr.get(`${board}|${c}`);
     if (dc === null && cc) dc = cc.dc_offset;
-    if (thr === null && cc) thr = cc.threshold;
+    if (thr === null && cc) thr = cc.positive ? cc.threshold : -cc.threshold;      // as the board gets it
     return { dc, thr };
   }
 
@@ -875,7 +876,7 @@ export function wavePanel(app, { onBoard } = {}) {
     t0 = ref ? ref.trigger_at : null;
     showSpanText();                                    // the times of the range measured, at this board's sample time
     if (view.source === "live") {                      // the thresholds the run uses, for Tune…
-      for (const ch of view.channels) if (ch.threshold !== null && ch.threshold !== undefined) runThr.set(`${view.board}|${ch.ch}`, Math.abs(ch.threshold));
+      for (const ch of view.channels) if (ch.threshold !== null && ch.threshold !== undefined) runThr.set(`${view.board}|${ch.ch}`, ch.threshold);
     }
     const byCh = new Map(view.channels.map((ch) => [ch.ch, ch]));
     const isFile = view.source === "file";
