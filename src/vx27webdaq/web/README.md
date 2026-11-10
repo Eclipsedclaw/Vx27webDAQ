@@ -32,6 +32,7 @@ The plots take the left; the right column has the tabs **Plot** (every control o
 
 **Waveforms, view Channels**: the channels of one board, each in its own plot, live (the newest event) or from a `.raw` or ROOT file, event by event.
 - **Channels…**: click channels to show or hide them, at most 16 at a time; quick choices 0–15, 16–31, …, *read out*, *in trigger*; each board keeps its own choice in this browser.
+- **×** on a plot closes it: its channel leaves the channels shown (Channels… brings it back), the server is no longer asked for it, and the page lets go of what that plot held (its waveform, means, FFT sums, histogram). The other plots keep theirs. With every plot closed the page asks the server for nothing.
 - The x axes give each sample and its time from the trigger at the board's own sample time (2 ns on a V2730, 8 ns × decimation on a V2740). The cursor is one dashed line on every channel plot at once, labelled *sample N · time*.
 - ADC range Auto, Full scale (the board's 14 or 16 bits), Custom or baseline ± N; each plot can also have its own y range (its sliders button); dashed trigger and threshold lines.
 - Drag or wheel to zoom all plots, or **Measure** a range: min, max, mean, σ, peak, the values at both edges and their difference (like WaveDump2's two cursors), area in ADC·ns.

@@ -5,6 +5,10 @@ What changed in each version of Vx27webDAQ (ALAB DAQ until v0.0.18). Write the n
 
 ## Unreleased
 
+## v0.1.31 (2026-11-10)
+
+- Close a plot: each channel plot on the Run page has a close button (×). Its channel leaves the channels shown (as in Channels…), the server is no longer asked for it, and the page lets go of what the plot held: its waveform, the means or FFT sums, the histogram, the FFT or histogram plot, and at Pause its samples. The other plots keep their channel, means and histogram (before, a channel taken out moved the plots after it to other cards and their means began again). With every plot closed the page sends no waveform requests and says how to open plots again; a plot that shows no channel now holds nothing.
+
 ## v0.1.30 (2026-11-10)
 
 - Negative thresholds, as CAEN's TriggerThr: every threshold of the page is shown and typed as the board gets it, counts from the baseline, negative for negative pulses (e.g. −100 for a SiPM, falling edge), positive for positive ones (rising edge). The sign is the pulse direction: a negative number unticks *positive*, ticking it flips the sign. This holds on the Configuration page (Trigger panel and *same for all*, Channels table and its *all channels* row, Set all thresholds…), in Tune… during a run (only the run's direction: the edge does not change during a run; the server refuses the other sign) and in threshold scans (e.g. −50, −100, …). Before, a negative number was refused ("from 0 to 65535") although the board got −N for negative pulses. The configuration files keep the size and the direction apart (`threshold`, `positive`), so older files and run records mean the same; `/api/run/control` and `/api/live/boards` now take and give the signed number.

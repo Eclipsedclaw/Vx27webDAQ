@@ -183,16 +183,22 @@ export function wavePanel(app, { onBoard } = {}) {
   panel.appendChild(body);
   panel.appendChild(combo.el);
   const cards = [];
+  const noneBox = h("div.notice.info.hidden", icon("info"), h("span.grow", t("No plot is open: choose the channels to show with Channels (Plot tab)")));
+  wrap.insertBefore(noneBox, grid);
   for (let k = 0; k < MAX_CARDS; k++) {
+    const x = {};                  // this card: its place in `cards` changes when a plot before it is closed
     const title = h("span.wave-title"), meta = h("span.wave-meta"), warn = h("span"), read = h("span.wave-read");
     const expand = h("button.btn.btn-ghost.btn-sm.btn-icon", { type: "button", "aria-label": t("This channel alone"),
                                                                title: t("This channel alone, or all channels again"),
-                                                               onclick: () => enlarge(enlarged === k ? null : k) }, icon("expand"));
+                                                               onclick: () => { const i = cards.indexOf(x); enlarge(enlarged === i ? null : i); } }, icon("expand"));
     const ybtn = h("button.btn.btn-ghost.btn-sm.btn-icon", { type: "button", "aria-label": t("This channel's y range"),
-                                                             title: t("This channel's own y range (else the panel's)"), onclick: () => toggleCardRange(k) }, icon("sliders"));
+                                                             title: t("This channel's own y range (else the panel's)"), onclick: () => toggleCardRange(cards.indexOf(x)) }, icon("sliders"));
+    const shut = h("button.btn.btn-ghost.btn-sm.btn-icon", { type: "button", "aria-label": t("Close this plot"),
+                                                             title: t("Close this plot: its channel is not asked for any more, and what the plot held here (its waveform, means, FFT and histogram) is let go. Channels shows it again"),
+                                                             onclick: () => closeCard(x) }, icon("close"));
     const rangeRow = h("div.ch-range.hidden");
     const plotEl = h("div.plot"), xyEl = h("div.plot.hidden"), empty = h("div.wave-empty.hidden");
-    const card = h("div.wave", h("div.wave-head", title, meta, warn, read, ybtn, expand), rangeRow, h("div.wave-plot", plotEl, xyEl, empty));
+    const card = h("div.wave", h("div.wave-head", title, meta, warn, read, ybtn, expand, shut), rangeRow, h("div.wave-plot", plotEl, xyEl, empty));
     grid.appendChild(card);
     const plot = new WavePlot(plotEl, { readout: read, onZoom: (x0, x1) => zoomAll(x0, x1), onMeasure: (x0, x1) => setSpan([x0, x1]),
                                         onWheel: (x0, x1) => wheelZoom(x0, x1), onReset: () => { resetZoom(); load(true); },
@@ -204,8 +210,8 @@ export function wavePanel(app, { onBoard } = {}) {
     const row = h("tr", cells);
     measureRows.appendChild(row);
     plot.setUnit(yUnit, mvPerAdc);
-    cards.push({ card, title, meta, warn, read, plot, empty, expand, row, cells, ch: null, plotEl, xyEl, xy: null, ybtn, rangeRow,
-                 ring: new Ring(avgN), hist: new SampleHistogram(), accKey: null, taken: new Set(), nEvents: 0 });
+    cards.push(Object.assign(x, { card, title, meta, warn, read, plot, empty, expand, row, cells, ch: null, plotEl, xyEl, xy: null, ybtn, rangeRow,
+                                  ring: new Ring(avgN), hist: new SampleHistogram(), accKey: null, taken: new Set(), nEvents: 0 }));
   }
   let lastBins = 0;
   const ro = new ResizeObserver(() => layout());
@@ -339,15 +345,49 @@ export function wavePanel(app, { onBoard } = {}) {
 
   function showCards() {
     const chans = channelsShown();
+    // a channel shown before keeps its card (its means and histogram) when others are closed or added
+    const mine = new Map(cards.filter((x) => x.ch !== null && chans.includes(x.ch)).map((x) => [x.ch, x]));
+    const free = cards.filter((x) => mine.get(x.ch) !== x);
+    const order = [...chans.map((c) => mine.get(c) || free.shift()), ...free];
+    if (order.some((x, k) => cards[k] !== x)) {
+      cards.splice(0, cards.length, ...order);
+      cards.forEach((x) => { grid.appendChild(x.card); measureRows.appendChild(x.row); });
+    }
     cards.forEach((x, k) => {
       if (x.ch !== (k < chans.length ? chans[k] : null)) x.rangeRow.classList.add("hidden");
       x.ch = k < chans.length ? chans[k] : null;
+      if (x.ch === null && (x.accKey !== null || x.xy)) release(x);
       const shown = x.ch !== null && (enlarged === null || enlarged === k);
       x.card.classList.toggle("hidden", !shown);
       x.row.classList.toggle("hidden", x.ch === null);
     });
+    noneBox.classList.toggle("hidden", chans.length > 0 || Boolean(liveError));
     applyRanges();
     layout();
+  }
+
+  // a plot closed: its channel leaves the channels shown (as in Channels), so the server is not asked for it any
+  // more, and its card lets go of what it held (showCards); at Pause its samples leave the copy kept too
+  function closeCard(x) {
+    const c = x.ch;
+    if (c === null) return;
+    if (enlarged !== null) enlarge(null);
+    if (frozen) frozen = { ...frozen, channels: frozen.channels.filter((ch) => ch.ch !== c) };
+    setSel(sel.filter((k) => k !== c));
+    showPick();
+  }
+
+  // a card that shows no channel keeps nothing: its waveform, the means or FFT sums, the histogram and the events
+  // taken go, and its FFT or histogram plot is taken down (made again when it is needed)
+  function release(x) {
+    clearCard(x);
+    x.accKey = null;
+    x.plot.setView(null);
+    if (x.xy) { x.xy.destroy(); x.xy = null; }
+    setText(x.title, "");
+    clear(x.meta);
+    clear(x.warn);
+    x.cells.forEach((c, i) => setText(c, i ? "—" : ""));
   }
 
   // ---- a channel's own y range (per board and channel, in this browser), else the panel's ----
