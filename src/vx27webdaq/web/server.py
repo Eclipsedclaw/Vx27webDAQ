@@ -747,6 +747,16 @@ async def files_waveforms(request):
 
 
 @api("viewer")
+async def files_close(request):
+    """Close file (the Run page): the server closes the data files the page opened (at most 64 paths)."""
+    st: Station = request.app["station"]
+    paths = (await body(request)).get("paths")
+    if not isinstance(paths, list) or len(paths) > 64 or not all(isinstance(p, str) and p for p in paths):
+        raise ValueError("paths must be a list of at most 64 file paths")
+    return {"closed": await asyncio.to_thread(st.files.forget, paths)}     # realpath may wait for the NAS
+
+
+@api("viewer")
 async def files_overview(request):
     st: Station = request.app["station"]
     return await threaded(st.files.overview, request.query.get("path", ""))
@@ -938,6 +948,7 @@ def create_app(station: Station | None = None) -> web.Application:
     r.add_get("/api/files/info", files_info)
     r.add_get("/api/files/waveforms", files_waveforms)
     r.add_get("/api/files/overview", files_overview)
+    r.add_post("/api/files/close", files_close)
     r.add_get("/api/live/waveforms", live_waveforms)
     r.add_get("/api/live/boards", live_boards)
     r.add_get("/api/live/overview", live_overview)

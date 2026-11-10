@@ -635,6 +635,19 @@ class DataFiles:
         while len(self._open) > self._cache_size and unused:
             self._retire(self._open.pop(unused.pop(0)))
 
+    def forget(self, paths: list[str]) -> int:
+        """Close file (the Run page): these files leave the cache and are closed, at once or when the request using
+        one now is done (another page showing one opens it again at its next request); how many were open."""
+        reals = [os.path.realpath(p) for p in paths]       # the cache's keys; nothing is read
+        n = 0
+        with self._lock:
+            for real in reals:
+                f = self._open.pop(real, None)
+                if f is not None:
+                    self._retire(f)
+                    n += 1
+        return n
+
     def release(self, f: OpenFile) -> None:
         with self._lock:
             f.users -= 1

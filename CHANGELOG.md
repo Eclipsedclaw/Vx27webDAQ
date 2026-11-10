@@ -5,6 +5,10 @@ What changed in each version of Vx27webDAQ (ALAB DAQ until v0.0.18). Write the n
 
 ## Unreleased
 
+## v0.1.33 (2026-11-10)
+
+- Close file: the Run page's plots have a Close file button beside Open file… (shown while a file is open). It lets go of the file: every plot drops its waveform, means and histogram, the page shows Live again and forgets the file (no reopening at the next visit), and the server closes the files opened there (this one and the run's other boards' files chosen in Board), so their indexes and ROOT caches no longer use memory. A file another page is showing just opens again at its next request. New route `POST /api/files/close`.
+
 ## v0.1.32 (2026-11-10)
 
 - Every board's file of a run: a file opened on the Run page (Source: File) brings the other boards of its run. The Board menu lists every board's file beside it (in the run's order, the master first; the part of the same number), and choosing a board opens its file at the same event number, as the Board menu does live; before, a file showed its own board only, and each board's file had to be opened by hand. The files are found by their names (RUN_BOARD.raw, RUN_BOARD_001.raw, …), so each one is opened, and uses memory, only when its board is chosen. `/api/files/info` gives `run_files`.

@@ -42,6 +42,7 @@ export function wavePanel(app, { onBoard } = {}) {
   // ---- what to show ----
   let source = store("wave.source") === "file" && store("wave.file") ? "file" : "live";
   let file = store("wave.file") || "", fileInfo = null, eventNo = 0, paused = false, zoom = null, enlarged = null;
+  const openedFiles = new Set();              // the files opened here since the last Close file (the server's too)
   let boardInfo = { sample_ns: SAMPLE_NS, adc_max: ADC_MAX, pre_trigger: null, record_length: 0, model: "" };
   let range = loadJSON("wave.range", { mode: "auto", lo: 8000, hi: 9000, half: 200 });
   let lines = loadJSON("wave.lines", { trigger: false, threshold: false });
@@ -67,6 +68,9 @@ export function wavePanel(app, { onBoard } = {}) {
   const sourceSeg = segmented([["live", t("Live")], ["file", t("File")]], source, (v) => setSource(v), { label: t("Source") });
   const fileName = h("span.chip", { title: "" });
   const openBtn = h("button.btn.btn-sm", { type: "button", onclick: pickFile }, icon("folder"), t("Open file…"));
+  const closeFileBtn = h("button.btn.btn-sm", { type: "button", onclick: () => closeFile(),
+                                               title: t("Close the file: the plots let go of it and show Live again, and the server closes the files opened here (this one and the run's other boards' files chosen in Board)") },
+                         icon("close"), t("Close file"));
   const boardSel = h("select.input", { "aria-label": t("Board"), onchange: () => boardChanged() });
   const pickText = h("span.num");
   const pickBtn = h("button.btn.btn-sm", { type: "button", "aria-expanded": "false", onclick: () => togglePicker(),
@@ -147,7 +151,7 @@ export function wavePanel(app, { onBoard } = {}) {
   controls.append(
     h("div.ctl-stack",
       h("div.group", h("span.label", t("View")), viewSeg),
-      h("div.group", h("span.label", t("Source")), sourceSeg, openBtn), fileName,
+      h("div.group", h("span.label", t("Source")), sourceSeg, openBtn, closeFileBtn), fileName,
       boardGroup, chanGroup),
     pickBox,
     h("div.ctl-stack", evGroup, h("div.row.wrap.ctl-buttons", pauseBtn, allBtn)),
@@ -538,6 +542,7 @@ export function wavePanel(app, { onBoard } = {}) {
     evGroup.classList.toggle("hidden", !isFile || viewMode === "combined");
     pauseBtn.classList.toggle("hidden", isFile);
     fileName.classList.toggle("hidden", !isFile || !file);
+    closeFileBtn.classList.toggle("hidden", !isFile || !file);
     setText(fileName, basename(file));
     fileName.title = file;
     customBox.classList.toggle("hidden", range.mode !== "custom");
@@ -592,6 +597,21 @@ export function wavePanel(app, { onBoard } = {}) {
     if (v === "file") await openFile(file); else { fileInfo = null; fillBoards(); showCards(); showControls(); retake(); combo.sourceChanged(); }
   }
 
+  // Close file: the plots let go of the file (every card's waveform, means and histogram) and show Live again; the
+  // server closes the files opened here, unless a request is using one right now (then when it is done)
+  function closeFile() {
+    const paths = [...openedFiles];
+    openedFiles.clear();
+    file = "";
+    fileInfo = null;
+    eventNo = 0;
+    evInput.value = "0";
+    store("wave.file", null);
+    cards.forEach((x) => release(x));
+    setSource("live");
+    if (paths.length) post("/api/files/close", { paths }).catch(() => {});      // only memory: nothing to tell
+  }
+
   async function pickFile() {
     const path = await chooseFile({ title: t("Open a .raw or ROOT file") });
     if (path) await openFile(path);
@@ -620,6 +640,7 @@ export function wavePanel(app, { onBoard } = {}) {
     }
     if (my !== opening || gone) return;               // Live, or another file, was chosen while this one was read
     fileInfo = info;
+    openedFiles.add(info.path || path);
     file = path;
     source = "file";
     store("wave.file", path);

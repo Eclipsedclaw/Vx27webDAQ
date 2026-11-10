@@ -85,6 +85,8 @@
  "Click: into the manual controller": "クリック：マニュアルコントローラーへ",
  "Close": "閉じる",
  "Close all": "すべて閉じる",
+ "Close file": "ファイルを閉じる",
+ "Close the file: the plots let go of it and show Live again, and the server closes the files opened here (this one and the run's other boards' files chosen in Board)": "ファイルを閉じます：プロットはそれを手放してライブ表示に戻り、サーバーもここで開いたファイル（このファイルと「ボード」で選んだ同じランの他のボードのファイル）を閉じます",
  "Close this plot": "このプロットを閉じる",
  "Close this plot: its channel is not asked for any more, and what the plot held here (its waveform, means, FFT and histogram) is let go. Channels shows it again": "このプロットを閉じます：そのチャンネルはもう要求されず、ここで保持していたもの（波形、平均、FFT、ヒストグラム）は解放されます。「チャンネル」で再び表示できます",
  "Combined": "結合",

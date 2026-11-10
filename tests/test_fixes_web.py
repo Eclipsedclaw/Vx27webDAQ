@@ -635,6 +635,27 @@ class DataFileTests(FixTestCase):
         self.assertEqual([os.path.basename(r["path"]) for r in res["run_files"]],
                          ["run00005_b0_001.raw", "run00005_b1_001.raw", "run00005_a2.raw"])
 
+    async def test_close_file(self):
+        """Close file (the Run page): the server closes the files the page opened (they leave the cache); a path that
+        is not open, or not in a data folder, is no error; anything but a list of paths is refused; a file closed
+        opens again at the next request."""
+        a = write_raw(self.data("run00007_b0.raw"), "run00007", "b0", [(1, 100)])
+        b = write_raw(self.data("run00007_b1.raw"), "run00007", "b1", [(1, 100)], model="V2730")
+        for p in (a, b):
+            self.assertEqual((await self.client.get("/api/files/info", params={"path": p})).status, 200)
+        files = self.station.files
+        kept = [files._open[os.path.realpath(p)] for p in (a, b)]
+        r = await self.client.post("/api/files/close", json={"paths": [a, b, "/etc/passwd", self.data("none.raw")]},
+                                   headers=CHANGE)
+        self.assertEqual((r.status, (await r.json())["closed"]), (200, 2))
+        self.assertFalse(any(os.path.realpath(p) in files._open for p in (a, b)))
+        self.assertTrue(all(f.retired and f.closed for f in kept))
+        for bad in ({"paths": "x"}, {"paths": [1]}, {"paths": [""]}, {"paths": ["x"] * 65}, {}):
+            r = await self.client.post("/api/files/close", json=bad, headers=CHANGE)
+            self.assertEqual(r.status, 400, bad)
+        res = await (await self.client.get("/api/files/info", params={"path": a})).json()
+        self.assertEqual(res["events"], 1)
+
     async def test_combined_view_pairs_by_time(self):
         """C8: the other board's event is the one nearest in time within the sync window, not the one with the same
         24-bit trigger ID (which came round again, or belongs to a board that triggers by itself)."""
