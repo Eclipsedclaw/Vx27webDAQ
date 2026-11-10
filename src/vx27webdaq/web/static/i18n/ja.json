@@ -643,6 +643,7 @@
  "in trigger": "トリガー参加",
  "incoming triggers (Hz)": "入力トリガー (Hz)",
  "independent boards": "独立ボード",
+ "independent boards: no common clock": "独立ボード：共通クロックなし",
  "internal test pulse": "内部テストパルス",
  "its channel trigger (ITLA)": "自身のチャンネルトリガー（ITLA）",
  "its channels (ITLA AND ITLB)": "自身のチャンネル（ITLA AND ITLB）",

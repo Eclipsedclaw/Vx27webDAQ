@@ -37,7 +37,12 @@ def check(args) -> int:
     crate = None
     if args.simulate is not None:
         from vx27webdaq.daq.sim import Crate
-        crate = Crate(args.simulate, "none", {b.name: b.model for b in cfg.boards}, {b.name: len(b.channels) for b in cfg.boards})
+        try:                            # bad options: one JSON line that says so, as apply() does
+            crate = Crate(args.simulate, "none", {b.name: b.model for b in cfg.boards},
+                          {b.name: len(b.channels) for b in cfg.boards})
+        except ValueError as err:
+            print(json.dumps({"error": f"simulator: {err}"}), flush=True)
+            return 1
     code = 0
     for b in boards:
         t0 = time.monotonic()
@@ -51,12 +56,15 @@ def check(args) -> int:
             if args.trees:
                 tree = board.device_tree()
                 if tree is not None:
-                    os.makedirs(args.trees, exist_ok=True)
                     path = os.path.join(args.trees, f"{b.name}.json")
-                    with open(f"{path}.part", "w", encoding="utf-8") as f:
-                        json.dump(tree, f)
-                    os.replace(f"{path}.part", path)
-                    out["tree"] = path
+                    try:                # the board answered: a folder the tree cannot go into is only a warning
+                        os.makedirs(args.trees, exist_ok=True)
+                        with open(f"{path}.part", "w", encoding="utf-8") as f:
+                            json.dump(tree, f)
+                        os.replace(f"{path}.part", path)
+                        out["tree"] = path
+                    except OSError as err:
+                        out["warnings"] = [f"cannot save its parameter tree in {args.trees}: {err}"]
         except BoardError as err:
             out["error"] = str(err)
             code = 1
@@ -75,7 +83,7 @@ def apply(args) -> int:
     One JSON line per board: ok, sent (settings set), warnings, error, record_length, pre_trigger."""
     from vx27webdaq.core import config as C
     from vx27webdaq.core import models
-    from vx27webdaq.daq.boards import BoardError, open_board
+    from vx27webdaq.daq.boards import BoardError, open_board, send_setting
     try:
         cfg, _ = C.load_config(args.config)
     except (OSError, C.ConfigError) as err:
@@ -111,24 +119,10 @@ def apply(args) -> int:
             board.cmd("Reset")
             refused: set = set()
 
-            def send(s):
-                name = s.path.rsplit("/", 1)[-1].lower()
-                if name in refused:
-                    return
-                try:
-                    board.set(s.path, s.value)
-                    out["sent"] += 1
-                except BoardError as err:
-                    if not (s.optional or s.alt):
-                        raise BoardError(f"the board refused {s.path} = {s.value}: {err}") from None
-                    refused.add(name)
-                    out["warnings"].append(f"the board refused {s.path} = {s.value} ({err}); "
-                                           + ("its alternative was sent" if s.alt else "a run goes on without it"))
-                    for a in s.alt:
-                        if a.path:
-                            send(a)
-            for s in C.plan(cfg, k, m):
-                send(s)
+            def took(_setting):
+                out["sent"] += 1
+            for s in C.plan(cfg, k, m):         # the rules of a run (boards.send_setting): a refusal ends the board
+                send_setting(board, s, refused, took, out["warnings"].append)   # unless optional or with alternatives
             try:
                 out["record_length"] = int(float(board.get("/par/RecordLengthS")))
                 out["pre_trigger"] = int(float(board.get("/par/PreTriggerS")))
@@ -164,7 +158,11 @@ def param(args) -> int:
     crate = None
     if args.simulate is not None:
         from vx27webdaq.daq.sim import Crate
-        crate = Crate(args.simulate, "none", {b.name: b.model}, {b.name: len(b.channels)})
+        try:
+            crate = Crate(args.simulate, "none", {b.name: b.model}, {b.name: len(b.channels)})
+        except ValueError as err:
+            print(json.dumps({"board": b.name, "ok": False, "error": f"simulator: {err}"}), flush=True)
+            return 1
     out, board = {"board": b.name, "ok": False}, None
     try:
         board = open_board(b.uri, crate, b.name)

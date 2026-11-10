@@ -9,6 +9,8 @@ every trigger ID that every board has passed ("settled"), the check counts:
     out of sync  every board has it, but some timestamp is farther off: the boards count differently, or lost
                  their common clock
     missing      per board: the IDs the other boards have and this one does not
+    late         per board: IDs that came after they were counted missing (the board was more than LAG_IDS
+                 behind the others): taken off its missing count, not compared
 and, per board, the difference of its timestamps from the first board's for the same ID (mean, σ, lowest,
 highest): a fixed delay of a few ns is the cabling; one that moves means the clocks are not one.
 The readers hand over each buffer's trigger IDs (made continuous over the 24-bit wrap) and timestamps.
@@ -34,6 +36,7 @@ class SyncCheck:
         self.settled = -1
         self.checked = self.built = self.out_of_sync = 0
         self.missing = [0] * n
+        self.late = [0] * n                     # IDs that came after they were counted missing (a board far behind)
         self.d_n = [0] * n
         self.d_sum = [0.0] * n
         self.d_sq = [0.0] * n
@@ -42,9 +45,21 @@ class SyncCheck:
         self.first_bad: dict | None = None      # the first trigger out of sync, for the log
 
     def add(self, k: int, ids: np.ndarray, ts: np.ndarray) -> None:
-        if len(ids):
-            self.new[k].append((ids, ts))
-            self.last[k] = max(self.last[k], int(ids[-1]))
+        if not len(ids):
+            return
+        self.last[k] = max(self.last[k], int(ids[-1]))
+        late = ids <= self.settled
+        if late.any():
+            # IDs already settled: this board was more than LAG_IDS behind, and they were counted missing on it. They
+            # came after all: off its missing count, and not checked again (they would count as missing on every
+            # other board, whose IDs up to settled are gone)
+            n = int(late.sum())
+            self.late[k] += n
+            self.missing[k] = max(0, self.missing[k] - n)
+            ids, ts = ids[~late], ts[~late]
+            if not len(ids):
+                return
+        self.new[k].append((ids, ts))
 
     def process(self, final: bool = False) -> None:
         """Count the triggers every board has passed (all of them when final: the run is over)."""
@@ -112,11 +127,14 @@ class SyncCheck:
         return {"applies": True, "reference": self.names[0], "window_ns": self.window * TICK_NS, "checked": self.checked,
                 "built": self.built, "out_of_sync": self.out_of_sync,
                 "missing": {n: m for n, m in zip(self.names, self.missing)}, "offsets": offsets,
-                "first_bad": self.first_bad}
+                "late": {n: m for n, m in zip(self.names, self.late)}, "first_bad": self.first_bad}
 
     def summary(self) -> str:
         v = self.view()
         miss = ", ".join(f"{n} {m}" for n, m in v["missing"].items() if m) or "none"
+        late = ", ".join(f"{n} {m}" for n, m in v["late"].items() if m)
         offs = ", ".join(f"{n} {o['mean_ns']:+.0f} ns ({o['min_ns']:+.0f}…{o['max_ns']:+.0f})" for n, o in v["offsets"].items())
         return (f"sync check: {v['checked']} trigger IDs, {v['built']} on every board within {v['window_ns']} ns, "
-                f"{v['out_of_sync']} out of sync; missing: {miss}" + (f"; timestamps against {v['reference']}: {offs}" if offs else ""))
+                f"{v['out_of_sync']} out of sync; missing: {miss}"
+                + (f"; late (not compared, the board was far behind): {late}" if late else "")
+                + (f"; timestamps against {v['reference']}: {offs}" if offs else ""))

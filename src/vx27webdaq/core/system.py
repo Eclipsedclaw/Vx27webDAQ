@@ -19,8 +19,20 @@ def memory() -> dict[str, float]:
             "swap_used_mib": (info.get("SwapTotal", 0) - info.get("SwapFree", 0)) / 1024}
 
 
+def is_daq_run(argv: list[str], marker: str = "vx27webdaq.daq run") -> bool:
+    """argv is a DAQ run on the real boards: PYTHON -m vx27webdaq.daq run ... (marker: the module and the command),
+    without --simulate. Not a line that only contains the text (grep, an editor, the wrapper, a shell), and not a
+    simulated run, which touches no board (on a shared computer other people's test runs must not block a run)."""
+    want = ["-m"] + marker.split()
+    if len(argv) < 1 + len(want) or argv[1:1 + len(want)] != want:
+        return False
+    if not os.path.basename(argv[0]).startswith("python"):
+        return False
+    return not any(a == "--simulate" or a.startswith("--simulate=") for a in argv[1 + len(want):])
+
+
 def running_daq(marker: str = "vx27webdaq.daq run") -> list[tuple[int, str]]:
-    """(pid, command line) of every process whose command line contains marker, except this one and its parent."""
+    """(pid, command line) of every DAQ run on the real boards (is_daq_run), except this process and its parent."""
     found = []
     skip = {os.getpid(), os.getppid()}
     for entry in os.listdir("/proc"):
@@ -31,9 +43,8 @@ def running_daq(marker: str = "vx27webdaq.daq run") -> list[tuple[int, str]]:
                 argv = [a.decode(errors="replace") for a in f.read().split(b"\0") if a]
         except OSError:
             continue
-        line = " ".join(argv)
-        if marker in line and "vx27webdaq.web.wrapper" not in line:
-            found.append((int(entry), line))
+        if is_daq_run(argv, marker):
+            found.append((int(entry), " ".join(argv)))
     return found
 
 

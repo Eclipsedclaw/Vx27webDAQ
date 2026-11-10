@@ -8,7 +8,8 @@ RUN_FOLDER/config.json is the run's configuration (written by the server: the co
 run's name). The program prints its log (the server keeps it as daq.log) and writes into RUN_FOLDER:
     status.json      twice a second: the phase, each board's state, counters, files, housekeeping and statistics,
                      and the sync check (sync.py)
-    live/NAME.evt    the newest event of each board, as the board sent it (the page's live waveforms)
+    live/NAME.evt    the newest event of each board, as the board sent it (the page's live waveforms; of an event
+                     larger than LIVE_MAX_BYTES only its first samples of every channel)
     live/combined.set  one event of every board from the same moment (the page's combined view; write_set)
     control/N.done   the answer to the server's command control/N.json during the run: a Force trigger, or a
                      channel's DC offset or threshold (poll_control); every change is logged and kept in status
@@ -20,16 +21,20 @@ DATA_FOLDER/RUN_NAME_BOARD_hk.csv (RUN_FOLDER/hk/ when no data are kept).
 A run, in this order (CAEN's sync demo, caen-dig2 demo/caen-felib-demo-sync): connect to every board, one after
 the other, and check its firmware (Scope) and model; reset it and set its parameters (core/config.py: plan);
 activate the raw endpoint; arm every board, the last of the chain first; start one reader per board; send
-SwStartAcquisition to the master (to every board when they are independent). The run ends at its run time,
-when the first board has max_events events, on SIGTERM or SIGINT (Stop on the page), or when a board fails:
-SwStopAcquisition to the master (or every board); each reader goes on until its board's stop record, at most
-STOP_WAIT_S; then every board is disarmed and closed. Exit code 0: every board ended with its stop record;
-1: anything else.
+SwStartAcquisition to the master (to every board when they are independent; none to a master with a hardware
+start, whose run time begins with its first data). A Stop (SIGTERM, SIGINT or SIGHUP) before the boards are
+started ends the run there. The run ends at its run time, when the first board has max_events events, on SIGTERM,
+SIGINT or SIGHUP (Stop on the page), when a board fails or a board stops by itself: SwStopAcquisition to the
+master (or every board); each reader goes on until its board's stop record; a board without one STOP_WAIT_S after
+the stop gets SwStopAcquisition and DisarmAcquisition itself, and its reader ends when it is quiet, at the latest
+STOP_LIMIT_S after the stop (a second Stop: at once); then every board is disarmed and closed. Exit code 0: every
+board ended with its stop record and nothing went wrong; 1: anything else.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import signal
 import struct
@@ -43,21 +48,30 @@ import numpy as np
 from vx27webdaq import __version__
 from vx27webdaq.core import config as C
 from vx27webdaq.core import models, rawdata
-from vx27webdaq.daq.boards import HK, BoardError, channel_rates, housekeeping, open_board
+from vx27webdaq.daq.boards import HK, BoardError, channel_rates, housekeeping, open_board, send_setting
 from vx27webdaq.daq.sync import SyncCheck
 
 STOP_WAIT_S = 10.0          # after the stop command: how long a board may take to send its stop record
+STOP_LIMIT_S = 60.0         # a board still sending this long after the stop (it never got the stop, or ignores it):
+                            # its reader ends. Generous: a board may still be sending what its memory holds
 STATUS_S = 0.5
 LIVE_S = 0.25               # the newest event of a board is written at most this often
 SYNC_S = 0.5                # how often the sync check counts the triggers every board has passed
 LIVE_PARAMS = ("dcoffset", "triggerthr")       # what the server may change while the boards run
 STAT_KEYS = ("events", "icr_hz", "rate_hz", "dead_frac")      # derived columns of the housekeeping file
 SILENT_WARN_S = 5.0         # a board without any data this long after the start gets a warning
+START_REMIND_S = 60.0       # a master waiting for its hardware start: a line in the log this often
 RATE_WINDOW_S = 10.0
 GRID_SHIFT = 25             # timestamp cells of 2**25 ticks (0.27 s): each board keeps the first event of each
 GRID_KEEP = 16             # cells kept per board
 SET_S = 0.3                # how often the matched set is written (when there is a newer one)
 TS_MASK = (1 << 48) - 1
+# The live views keep and write whole events, but check_config allows records of up to 6.25 M samples: 64 channels
+# of those are 800 MB per event, so 16 kept per board, or one written four times a second, would take the memory
+# and the disk. 8 MB is still 64 channels of 65536 samples (more than the page draws), so usual records stay whole.
+PICK_MAX_BYTES = 8 << 20    # the combined view keeps no larger event (that board then has none: it says so once)
+PICKS_MAX_BYTES = 32 << 20  # and at most this much per board (the oldest go first)
+LIVE_MAX_BYTES = 8 << 20    # a live/NAME.evt holds at most this: the first samples of every channel of the event
 
 
 def _cell(v) -> str:
@@ -72,11 +86,39 @@ def stamp() -> str:
     return time.strftime("%H:%M:%S")
 
 
+def finite(value):
+    """value with every number that is not finite (NaN, ±Infinity: a reading a board could not make) as None. JSON
+    has no such numbers: a strict reader, like the browser's JSON.parse, refuses the whole file for one of them."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: finite(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [finite(v) for v in value]
+    return value
+
+
 def write_json(path: str, data) -> None:
     tmp = f"{path}.part"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f)
+        json.dump(finite(data), f, allow_nan=False)
     os.replace(tmp, path)
+
+
+def cut_event(data, o: int, max_bytes: int) -> tuple[bytes, int]:
+    """(the Scope event at offset o, as bytes, at most max_bytes long; samples per channel kept). A longer event
+    keeps its first samples of every channel: they come 4 per word, one word per channel in turn, so the first
+    words are a shorter event of the same channels (with its size set to them)."""
+    w1, w2, w3 = struct.unpack_from(">QQQ", data, o)
+    n_words = w1 & 0xFFFFFFFF
+    n_ch = bin(w3).count("1")
+    if n_words * rawdata.WORD <= max_bytes or n_ch == 0:
+        return bytes(data[o:o + n_words * rawdata.WORD]), (n_words - rawdata.SCOPE_HEADER_WORDS) * rawdata.SAMPLES_PER_WORD // max(1, n_ch)
+    groups = (max_bytes // rawdata.WORD - rawdata.SCOPE_HEADER_WORDS) // n_ch
+    keep = rawdata.SCOPE_HEADER_WORDS + groups * n_ch
+    head = struct.pack(">QQQ", (w1 & ~0xFFFFFFFF) | keep, w2, w3)
+    start = o + rawdata.SCOPE_HEADER_WORDS * rawdata.WORD
+    return head + bytes(data[start:o + keep * rawdata.WORD]), groups * rawdata.SAMPLES_PER_WORD
 
 
 class BoardRun:
@@ -100,6 +142,9 @@ class BoardRun:
         self.ended = ""             # "stop record", "time-out", "error"
         self.error = ""
         self.done = False
+        self.stopped_itself = False     # its stop record came before the stop command
+        self.still_sending = False      # its reader ended STOP_LIMIT_S after the stop, the board still sending
+        self.write_failed = False       # a write or flush of its data file failed
         self.last_data = None
         self.live_at = 0.0
         self.cell = None            # the newest timestamp cell seen (pick_cells)
@@ -107,6 +152,7 @@ class BoardRun:
         self.history: deque = deque()       # (time, events, bytes), for the recent rates
         self.monitors: dict = {}            # the newest housekeeping values (boards.HK)
         self.hk_wanted: dict | None = None
+        self.hk_seen: set = set()           # housekeeping keys read once (boards.housekeeping)
         self.hk_prev: dict | None = None
         self.stats: dict = {}               # from the counters: icr_hz, rate_hz, dead_frac, triggers, lost
         self.ch_rates: dict = {}            # channel -> self-trigger rate (Hz)
@@ -126,6 +172,8 @@ class BoardRun:
         self.pre_trigger = cfg_board.pre_trigger
         self.warned_silent = False
         self.format_warned = False
+        self.live_cut_warned = False
+        self.pick_warned = False
         self.thread: threading.Thread | None = None
         self.lock = threading.Lock()
 
@@ -181,18 +229,32 @@ class Run:
         self.stop_reason = ""
         self.stop_requested = ""
         self.kill_requested = False
-        self.t_start = None             # time.time() of the start command
-        self.mono_start = None
-        self.stopping_since = None
+        self.t_start = None             # time.time() of the start command (of the master's first data: hardware start)
+        self.mono_start = None          # the same in time.monotonic(): the run time counts from it
+        self.stop_sent = False          # the stop command is going out: from now on a stop record is its answer
+        self.stopping_since = None      # time.monotonic() once the stop command went out
+        self.hw_start = self.boards[0].cfg.io_start if self.boards else ""     # the master starts on S-IN, ...
+        self.level_ended = False        # the master's S-IN level (SINlevel) ended its run
+        self.armed_at = None
         self.live_dir = os.path.join(self.run_dir, "live")
         self.status_path = os.path.join(self.run_dir, "status.json")
         self._last_status = 0.0
         self._log_lock = threading.Lock()
-        self.set_cell = None            # the cell of the last live/combined.set
+        self._state_lock = threading.Lock()     # board states: the readers and the main thread both change them
+        self.set_cell = None            # (cell, timestamp) of the last live/combined.set
         self.control_dir = os.path.join(self.run_dir, "control")
         self.changes: list[dict] = []   # what was changed during the run (poll_control)
-        self.sync = (SyncCheck([b.name for b in self.boards], self.cfg.run.sync_window_ns)
-                     if len(self.boards) > 1 and C.common_trigger(self.cfg) else None)
+        # the sync check compares the trigger IDs and timestamps of every board: it needs one trigger for all (the
+        # same IDs) and one clock (the same time): with independent boards the timestamps have no common time
+        self.sync, self.sync_why = None, ""
+        if len(self.boards) < 2:
+            self.sync_why = "one board"
+        elif not C.common_trigger(self.cfg):
+            self.sync_why = "each board triggers by itself"
+        elif self.cfg.run.sync != "chain":
+            self.sync_why = "independent boards: no common clock"
+        else:
+            self.sync = SyncCheck([b.name for b in self.boards], self.cfg.run.sync_window_ns)
 
     # ---- output ----
     def log(self, text: str, level: str = "") -> None:
@@ -216,8 +278,7 @@ class Run:
                 "simulator": self.simulate is not None, "started": self.t_start, "t": t,
                 "duration": self.cfg.run.duration_s, "max_events": self.cfg.run.max_events,
                 "sync": self.cfg.run.sync, "setup": self.cfg.trigger.setup, "boards": boards,
-                "matching": self.sync.view() if self.sync else {"applies": False, "why": "one board" if len(self.boards) < 2
-                                                                else "each board triggers by itself"},
+                "matching": self.sync.view() if self.sync else {"applies": False, "why": self.sync_why},
                 "events": sum(b["events"] for b in boards), "bytes": sum(b["bytes"] for b in boards),
                 "stop_reason": self.stop_reason, "stop_requested": self.stop_requested,
                 "errors": self.errors[-20:], "warnings": self.warnings[-20:], "time": time.time(),
@@ -231,16 +292,66 @@ class Run:
         self.phase = phase
         self.status(force=True)
 
+    # ---- the boards' states (the readers and the main thread change them) ----
+    def board_error(self, br: BoardRun, message: str) -> None:
+        with self._state_lock:
+            br.state, br.message, br.ended, br.error = "error", message, "error", message
+        self.log(f"{br.name}: {message}", "error")
+
+    def write_error(self, br: BoardRun, err: Exception) -> None:
+        br.write_failed = True                  # (the reader's last flush would only fail the same way)
+        self.board_error(br, f"cannot write the data: {err}")
+
+    def end(self, br: BoardRun, how: str) -> None:
+        """How the board's run ended ("stop record", "time-out"); an error stays the end."""
+        with self._state_lock:
+            if br.ended != "error":
+                br.ended = how
+
+    def promote(self, br: BoardRun) -> None:
+        """armed -> running; never over an error a reader set in the meantime."""
+        with self._state_lock:
+            if br.state == "armed":
+                br.state = "running"
+
     # ---- signals ----
     def on_signal(self, number, _frame) -> None:
-        if self.stop_requested:
-            self.kill_requested = True          # a second one: do not wait for the stop records
-        self.stop_requested = signal.Signals(number).name
+        # a second Stop while the boards are stopping (the stop command is out): do not wait for the stop records.
+        # A second one before that (Stop twice, a SIGHUP after a SIGTERM) is only a Stop: the readers must still
+        # get the boards' last data and stop records after the stop command
+        if self.stop_requested and self.stopping_since is not None:
+            self.kill_requested = True
+        if not self.stop_requested:
+            self.stop_requested = signal.Signals(number).name
+
+    def stop_before_start(self) -> bool:
+        """A Stop came while the boards were connected, configured or armed: the run ends without starting them."""
+        if not self.stop_requested:
+            return False
+        if not self.stop_reason:
+            self.stop_reason = f"Stop ({self.stop_requested}) before the start"
+            self.log(f"Stop ({self.stop_requested}) before the boards were started: the run ends without data")
+        return True
 
     # ---- the run ----
     def main(self) -> int:
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            signal.signal(sig, self.on_signal)
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):     # SIGHUP: the wrapper passes it on (a closed
+            signal.signal(sig, self.on_signal)                          # session): a clean stop too, never a kill
+        try:
+            self.run()
+        except Exception as err:                    # anything unexpected, even while closing: still the end below
+            self.log(f"internal error: {err!r}", "error")
+        code = 0 if self.boards and not self.errors and all(b.ended == "stop record" for b in self.boards) else 1
+        try:
+            self.summary()
+        except Exception as err:
+            self.log(f"internal error in the summary: {err!r}", "error")
+            code = 1
+        finally:
+            self.set_phase("finished" if code == 0 else "failed")
+        return code
+
+    def run(self) -> None:
         os.makedirs(self.live_dir, exist_ok=True)
         os.makedirs(self.control_dir, exist_ok=True)
         cfg = self.cfg
@@ -249,22 +360,22 @@ class Run:
                  f"trigger setup {cfg.trigger.setup}" + (", SIMULATOR (no hardware)" if self.simulate is not None else ""))
         if not self.boards:
             self.log("no board is switched on in the configuration", "error")
-            self.set_phase("failed")
-            return 1
-        code = 1
+            return
         try:
             if self.connect() and self.configure() and self.arm_and_start():
                 self.take_data()
-                self.stop_all()
-            code = 0 if not self.errors and all(b.ended == "stop record" for b in self.boards) else 1
-        except Exception as err:                    # anything unexpected: still close the boards
+        except Exception as err:                    # anything unexpected: still stop and close the boards
             self.log(f"internal error: {err!r}", "error")
-            code = 1
         finally:
-            self.close_all()
-        self.summary()
-        self.set_phase("finished" if code == 0 else "failed")
-        return code
+            try:
+                # once a reader runs, the boards may be acquiring: stop them (and end the readers) before they are
+                # closed, whatever happened (a CAEN_FELib_Close during a ReadData of another thread is never safe)
+                if any(b.thread is not None for b in self.boards):
+                    self.stop_all()
+            except Exception as err:
+                self.log(f"internal error while stopping the boards: {err!r}", "error")
+            finally:
+                self.close_all()
 
     def connect(self) -> bool:
         self.set_phase("connecting")
@@ -280,14 +391,15 @@ class Run:
                 self.log(str(err), "error")
                 return False
         for br in self.boards:                      # CAEN_FELib_Open is not thread safe: one after the other
+            if self.stop_before_start():
+                return False
             br.state = "connecting"
             self.status()
             try:
                 br.board = open_board(br.uri, self.crate, br.name)
                 br.facts = br.board.identify()
             except BoardError as err:
-                br.state, br.message, br.ended = "error", str(err), "error"
-                self.log(f"{br.name}: {err}", "error")
+                self.board_error(br, str(err))
                 return False
             f = br.facts
             self.log(f"{br.name} ({br.uri}, {br.role}): {f.get('model', '?')} serial {f.get('serial', '?')}, firmware "
@@ -295,8 +407,7 @@ class Run:
                      f"{f.get('adc_bits', '?')} bit, {f.get('adc_msps', '?')} MS/s")
             problem = self.check_board(br)
             if problem:
-                br.state, br.message, br.ended = "error", problem, "error"
-                self.log(f"{br.name}: {problem}", "error")
+                self.board_error(br, problem)
                 return False
             br.state = "connected"
         return True
@@ -317,37 +428,28 @@ class Run:
         return ""
 
     def apply(self, br: BoardRun, s: C.Setting, refused: set) -> bool:
-        name = s.path.rsplit("/", 1)[-1].lower()
-        if name in refused:
-            return True
+        """One setting of plan(), by the rules of boards.send_setting; False: the board's configuration ends."""
+        def took(x: C.Setting) -> None:
+            br.applied.append([x.path, x.value])
+            self.log(f"  {br.name}: {x.path} = {x.value}" + (f"   ({x.why})" if x.why else ""))
         try:
-            br.board.set(s.path, s.value)
-            br.applied.append([s.path, s.value])
-            self.log(f"  {br.name}: {s.path} = {s.value}" + (f"   ({s.why})" if s.why else ""))
+            send_setting(br.board, s, refused, took, lambda text: self.log(f"{br.name}: {text}", "warning"))
             return True
         except BoardError as err:
-            if s.optional:                      # a test signal or an extra the board may not have: not fatal
-                refused.add(name)
-                self.log(f"{br.name}: the board refused {s.path} = {s.value} ({err}); the run goes on without it", "warning")
-                return True
-            if not s.alt:
-                br.state, br.message, br.ended = "error", str(err), "error"
-                self.log(f"{br.name}: the board refused {s.path} = {s.value}: {err}", "error")
-                return False
-            refused.add(name)
-            self.log(f"{br.name}: {s.path} was refused ({err}); using the alternative", "warning")
-            return all(self.apply(br, a, refused) for a in s.alt if a.path)
+            self.board_error(br, str(err))
+            return False
 
     def configure(self) -> bool:
         self.set_phase("configuring")
         for br in self.boards:
+            if self.stop_before_start():
+                return False
             br.state = "configuring"
             self.status()
             try:
                 br.board.cmd("Reset")
             except BoardError as err:
-                br.state, br.message, br.ended = "error", str(err), "error"
-                self.log(f"{br.name}: {err}", "error")
+                self.board_error(br, str(err))
                 return False
             refused: set = set()
             for s in C.plan(self.cfg, br.k, br.model):
@@ -367,8 +469,7 @@ class Run:
             try:
                 br.board.open_raw()
             except BoardError as err:
-                br.state, br.message, br.ended = "error", str(err), "error"
-                self.log(f"{br.name}: {err}", "error")
+                self.board_error(br, str(err))
                 return False
             if self.cfg.run.write_raw:
                 try:
@@ -400,34 +501,40 @@ class Run:
     def arm_and_start(self) -> bool:
         self.set_phase("arming")
         for br in reversed(self.boards):            # the slaves first: they must be armed when the run arrives
+            if self.stop_before_start():
+                return False
             try:
                 br.board.cmd("ArmAcquisition")
             except BoardError as err:
-                br.state, br.message, br.ended = "error", str(err), "error"
-                self.log(f"{br.name}: {err}", "error")
+                self.board_error(br, str(err))
                 return False
             br.state = "armed"
             self.log(f"{br.name}: armed")
+        if self.stop_before_start():                # armed, not started: close_all() disarms them
+            return False
+        starters = C.start_order(self.cfg)
+        hw = self.hw_start
+        if hw:                                  # the master starts on a hardware signal: no software start, and the
+            starters = [k for k in starters if k != 0]      # run time counts from its first data (read_loop)
+            self.armed_at = time.monotonic()
+            self.log(f"the run starts when the master sees its start signal ({hw}): waiting for the start signal")
+        else:
+            self.t_start, self.mono_start = time.time(), time.monotonic()
         for br in self.boards:
             br.thread = threading.Thread(target=self.reader, args=(br,), name=f"read-{br.name}", daemon=True)
             br.thread.start()
-        starters = C.start_order(self.cfg)
-        self.t_start, self.mono_start = time.time(), time.monotonic()
-        hw = self.boards[0].cfg.io_start
-        if hw:                                  # the master starts on a hardware signal: no software start
-            starters = [k for k in starters if k != 0]
-            self.log(f"the run starts when the master sees its start signal ({hw}); waiting for it")
         for k in starters:
             br = self.boards[k]
             try:
                 br.board.cmd("SwStartAcquisition")
             except BoardError as err:
-                br.state, br.message = "error", str(err)
-                self.log(f"{br.name}: {err}", "error")
+                self.board_error(br, str(err))
                 self.stop_reason = "a board could not start"
                 return True                     # the boards are armed: stop_all() stops them cleanly
-        for br in self.boards:
-            br.state = "running"
+        # the boards started now: armed -> running, never over an error a reader set meanwhile (a failed first read).
+        # With a hardware start each board's reader does it at its first data
+        for br in (self.boards if not hw else [self.boards[k] for k in starters]):
+            self.promote(br)
         who = "the master" if self.chained else "every board"
         if not hw:
             self.log(f"run started: SwStartAcquisition sent to {who}")
@@ -435,14 +542,39 @@ class Run:
         return True
 
     def reader(self, br: BoardRun) -> None:
-        """Reads one board until its stop record (or the time-out after the stop command)."""
+        """Reads one board until its stop record (or the time-out after the stop command). It never ends silently:
+        any failure, also of the file, ends the board with an error that the main loop sees."""
+        try:
+            self.read_loop(br)
+        except Exception as err:
+            self.board_error(br, f"its data reader failed: {err!r}")
+        finally:
+            if br.writer is not None and not br.write_failed:
+                try:
+                    br.writer.flush()
+                except Exception as err:            # a full disk, an I/O error: the data in the buffer are lost
+                    self.write_error(br, err)
+            with self._state_lock:
+                if br.state != "error":
+                    br.state = "stopped"
+            br.done = True
+
+    def read_loop(self, br: BoardRun) -> None:
         b, last_flush, last_hist = br.board, time.monotonic(), 0.0
         while True:
+            now = time.monotonic()
+            if self.stopping_since is not None:     # on every pass: a board that keeps sending is never quiet
+                if self.kill_requested:             # a second Stop during the stop: do not wait for the stop record
+                    self.end(br, "time-out")
+                    break
+                if now - self.stopping_since > STOP_LIMIT_S:
+                    br.still_sending = True
+                    self.end(br, "time-out")
+                    break
             try:
                 data, n = b.read_raw(100)
             except BoardError as err:
-                br.error, br.ended, br.state = str(err), "error", "error"
-                self.log(f"{br.name}: {err}", "error")
+                self.board_error(br, str(err))
                 break
             now = time.monotonic()
             if now - last_hist >= 1.0:
@@ -452,71 +584,104 @@ class Run:
                         br.history.popleft()
                 last_hist = now
             if data is None:                        # nothing for 100 ms
-                if self.kill_requested or (self.stopping_since is not None and now - self.stopping_since > STOP_WAIT_S):
-                    br.ended = "time-out"
+                if self.stopping_since is not None and now - self.stopping_since > STOP_WAIT_S:
+                    self.end(br, "time-out")
                     break
                 continue
-            if len(data) == 0:
-                br.ended = "stop record"
+            if len(data) == 0:                      # FELib's STOP: the acquisition ended, after the last data
+                self.stopped(br)
                 break
-            offs: list = []
-            try:
-                sc = rawdata.scan(data, offsets=offs)
-            except rawdata.RawFormatError as err:
-                sc = None
-                if not br.format_warned:
-                    br.format_warned = True
-                    self.log(f"{br.name}: data that are not Scope events: {err}", "warning")
-            if br.writer is not None:
+            if br.writer is not None:               # first into the file, exactly as it came; then the analysis
                 try:
                     br.writer.write(data)
-                except OSError as err:
-                    br.error, br.ended, br.state = str(err), "error", "error"
-                    self.log(f"{br.name}: cannot write the data: {err}", "error")
+                except Exception as err:
+                    self.write_error(br, err)
                     break
             br.buffers += 1
             br.bytes += len(data)
-            br.events += sc.events if sc else n
             br.last_data = now
-            if sc is not None:
-                if sc.first_scope is not None and br.first_trigger is None:
-                    br.first_trigger = (struct.unpack_from(">Q", data, sc.first_scope)[0] >> 32) & 0xFFFFFF
-                if sc.last_scope is not None:
-                    w1, w2 = struct.unpack_from(">QQ", data, sc.last_scope)
-                    br.last_trigger, br.last_timestamp = (w1 >> 32) & 0xFFFFFF, w2 & 0xFFFFFFFFFFFF
-                    if now - br.live_at >= LIVE_S:
-                        br.live_at = now
-                        size = (w1 & 0xFFFFFFFF) * rawdata.WORD
-                        self.write_live(br, bytes(data[sc.last_scope:sc.last_scope + size]))
-                if offs:
-                    words = np.frombuffer(data, dtype=">u8", count=len(data) // rawdata.WORD)
-                    idx = np.asarray(offs, dtype=np.int64) // rawdata.WORD
-                    w1, w2 = words[idx], words[idx + 1]
-                    self.pick_cells(br, data, offs, w1, w2)
-                    if self.sync is not None:
-                        self.sync_push(br, w1, w2)
-                    if not br.board_fail and np.any((w1 >> np.uint64(56)) & np.uint64(1)):
-                        br.board_fail = True
-                        self.log(f"{br.name}: its events carry the board-fail flag: the board reports a failure "
-                                 "(a lost clock, an overheated part); see its housekeeping", "warning")
-                for _, sp in sc.specials:
-                    if sp["kind"] == "start":
-                        br.start_record = sp
-                    elif sp["kind"] == "stop":
-                        br.stop_record = sp
-                        br.ended = "stop record"
+            if self.hw_start and self.mono_start is None and br.k == 0:     # the run begins with the master's data
+                self.t_start, self.mono_start = time.time(), now
+                self.log(f"run started: the master saw its start signal ({self.hw_start})")
+            if br.state == "armed":
+                self.promote(br)
+            try:
+                found, got_stop = self.analyse(br, data, now)
+            except Exception as err:                # data the analysis does not expect: they are in the file
+                found, got_stop = None, False
+                if not br.format_warned:
+                    br.format_warned = True
+                    self.log(f"{br.name}: data that are not Scope events: {err}", "warning")
+            br.events += found if found is not None else n
             if br.writer is not None and now - last_flush > 1.0:
-                br.writer.flush()
+                try:
+                    br.writer.flush()
+                except Exception as err:
+                    self.write_error(br, err)
+                    break
                 last_flush = now
-            if br.ended:
+            if got_stop:                            # its stop record: the board sends nothing after it
                 break
-        if br.writer is not None:
-            br.writer.flush()
-        if br.state != "error":
-            br.state = "stopped"
-        br.done = True
 
-    def write_live(self, br: BoardRun, event: bytes) -> None:
+    def analyse(self, br: BoardRun, data, now: float) -> tuple[int, bool]:
+        """One buffer of the board (already in its file): the counters, the live views, the sync check, the start
+        and stop records. Returns its number of Scope events, and whether the stop record was in it."""
+        got_stop = False
+        offs: list = []
+        sc = rawdata.scan(data, offsets=offs)
+        if sc.first_scope is not None and br.first_trigger is None:
+            br.first_trigger = (struct.unpack_from(">Q", data, sc.first_scope)[0] >> 32) & 0xFFFFFF
+        if sc.last_scope is not None:
+            w1, w2 = struct.unpack_from(">QQ", data, sc.last_scope)
+            br.last_trigger, br.last_timestamp = (w1 >> 32) & 0xFFFFFF, w2 & 0xFFFFFFFFFFFF
+            if now - br.live_at >= LIVE_S:
+                br.live_at = now
+                self.write_live(br, data, sc.last_scope)
+        if offs:
+            words = np.frombuffer(data, dtype=">u8", count=len(data) // rawdata.WORD)
+            idx = np.asarray(offs, dtype=np.int64) // rawdata.WORD
+            w1, w2 = words[idx], words[idx + 1]
+            self.pick_cells(br, data, offs, w1, w2)
+            if self.sync is not None:
+                self.sync_push(br, w1, w2)
+            if not br.board_fail and np.any((w1 >> np.uint64(56)) & np.uint64(1)):
+                br.board_fail = True
+                self.log(f"{br.name}: its events carry the board-fail flag: the board reports a failure "
+                         "(a lost clock, an overheated part); see its housekeeping", "warning")
+        for _, sp in sc.specials:
+            if sp["kind"] == "start":
+                br.start_record = sp
+            elif sp["kind"] == "stop":
+                br.stop_record = sp
+                got_stop = True
+                self.stopped(br)
+        return sc.events, got_stop
+
+    def stopped(self, br: BoardRun) -> None:
+        """The board's acquisition ended (its stop record, or FELib's STOP). Before the stop command that is a board
+        that stopped by itself: the run must not go on without it (exit code 1), except where the master starts
+        on the S-IN level, whose end stops the run (the master, and in a chain every board with it)."""
+        if br.ended == "stop record":
+            return
+        self.end(br, "stop record")
+        if self.stop_sent or br.ended != "stop record":
+            return
+        if self.hw_start == "SINlevel" and (br.k == 0 or self.chained):
+            self.level_ended = True
+            self.log(f"{br.name}: its acquisition ended with the S-IN level (the master starts on SINlevel)")
+            return
+        br.stopped_itself = True
+        advice = ("check its CLK-IN cable from the board before it, and its error flags" if self.chained and br.k > 0
+                  else "check its error flags and its network link")      # (a master runs on its own clock)
+        self.log(f"{br.name} stopped by itself during the run (its stop record came before the stop command): {advice}",
+                 "error")
+
+    def write_live(self, br: BoardRun, data, o: int) -> None:
+        event, samples = cut_event(data, o, LIVE_MAX_BYTES)
+        if len(event) < (struct.unpack_from(">Q", data, o)[0] & 0xFFFFFFFF) * rawdata.WORD and not br.live_cut_warned:
+            br.live_cut_warned = True
+            self.log(f"{br.name}: its events are larger than {LIVE_MAX_BYTES >> 20} MB: the live view shows the first "
+                     f"{samples} samples of each channel; the data files keep every sample")
         path = os.path.join(self.live_dir, f"{br.name}.evt")
         try:
             with open(f"{path}.part", "wb") as f:
@@ -527,19 +692,28 @@ class Run:
 
     def pick_cells(self, br: BoardRun, data, offs: list, w1: np.ndarray, w2: np.ndarray) -> None:
         """Keep the first event of every new timestamp cell (2**GRID_SHIFT ticks). Boards that share the clock
-        (a clock chain) and the trigger keep the same triggers, so write_set can show one moment on all."""
+        (a clock chain) and the trigger keep the same triggers, so write_set can show one moment on all. A cell is
+        new when it differs from the one before: after a timestamp reset (S-IN, GPIO) the cells are smaller again."""
         cells = ((w2 & np.uint64(TS_MASK)) >> np.uint64(GRID_SHIFT)).astype(np.int64)
-        if br.cell is not None and cells[-1] == br.cell:
-            return                              # no new cell in this buffer: the usual case
         before = np.concatenate(([-1 if br.cell is None else br.cell], cells[:-1]))
-        for i in np.nonzero(cells > before)[0][-GRID_KEEP:]:
+        new = np.nonzero(cells != before)[0][-GRID_KEEP:]
+        br.cell = int(cells[-1])
+        for i in new:
             o = offs[int(i)]
             a = int(w1[i])
             size = (a & 0xFFFFFFFF) * rawdata.WORD
+            if size > PICK_MAX_BYTES:
+                if not br.pick_warned:
+                    br.pick_warned = True
+                    self.log(f"{br.name}: its events are larger than {PICK_MAX_BYTES >> 20} MB: the combined live view "
+                             "keeps no events this large, so it cannot show this run; the data files keep them all")
+                continue
             pick = (int(cells[i]), (a >> 32) & 0xFFFFFF, int(w2[i]) & TS_MASK, bytes(data[o:o + size]))
             with br.lock:
                 br.picks.append(pick)
-        br.cell = max(int(cells[-1]), br.cell if br.cell is not None else -1)
+                total = sum(len(p[3]) for p in br.picks)
+                while total > PICKS_MAX_BYTES and len(br.picks) > 1:
+                    total -= len(br.picks.popleft()[3])
 
     def sync_push(self, br: BoardRun, w1: np.ndarray, w2: np.ndarray) -> None:
         """Hand this buffer's trigger IDs (continuous over the 24-bit wrap) and timestamps to the sync check."""
@@ -636,7 +810,7 @@ class Run:
             return
         if b.hk_wanted is None:
             b.hk_wanted = dict(HK)
-        vals = housekeeping(b.board, b.hk_wanted)
+        vals = housekeeping(b.board, b.hk_wanted, b.hk_seen)
         b.ch_rates = channel_rates(b.board, [c for c, ch in enumerate(b.cfg.channels) if ch.enabled], b.rates_state)
         run_s = 0.0 if self.mono_start is None else now - self.mono_start
         stats = {"events": b.events}
@@ -660,28 +834,39 @@ class Run:
         self.check_alarms(b, vals)
 
     def write_hk(self, b: BoardRun, run_s: float, vals: dict, stats: dict) -> None:
-        if b.hk_out is None:
-            if self.cfg.run.write_raw:
-                folder = os.path.expanduser(self.cfg.run.data_dir)
-            else:
-                folder = os.path.join(self.run_dir, "hk")
-            try:
+        """A row of the board's _hk.csv. A disk or NAS error there is a warning, once, and the housekeeping file is
+        written no more: it must never stop the run, or skip the stop of the boards."""
+        if b.hk_out is False:
+            return
+        if self.cfg.run.write_raw:
+            folder = os.path.expanduser(self.cfg.run.data_dir)
+        else:
+            folder = os.path.join(self.run_dir, "hk")
+        try:
+            if b.hk_out is None:
                 os.makedirs(folder, exist_ok=True)
                 b.hk_file = os.path.join(folder, f"{self.run_name}_{b.name}_hk.csv")
-                b.hk_out = open(b.hk_file, "x", encoding="utf-8")
-            except OSError as err:
-                self.log(f"{b.name}: cannot write its housekeeping file: {err}", "warning")
-                b.hk_file, b.hk_out = None, False
-                return
-            b.hk_cols = list(vals) + [f"ch{c}_trg_rate" for c in sorted(b.ch_rates)]
-            b.hk_out.write(",".join(["time", "run_s"] + b.hk_cols + list(STAT_KEYS)) + "\n")
-        if not b.hk_out:
-            return
-        row = {**vals, **{f"ch{c}_trg_rate": v for c, v in b.ch_rates.items()}}
-        cells = [f"{time.time():.3f}", f"{run_s:.3f}"] + [_cell(row.get(k)) for k in b.hk_cols] + [_cell(stats.get(k)) for k in STAT_KEYS]
-        b.hk_out.write(",".join(cells) + "\n")
-        b.hk_out.flush()
-        b.hk_rows += 1
+                try:
+                    b.hk_out = open(b.hk_file, "x", encoding="utf-8")
+                except OSError:
+                    b.hk_file = None
+                    raise
+                b.hk_cols = list(vals) + [f"ch{c}_trg_rate" for c in sorted(b.ch_rates)]
+                b.hk_out.write(",".join(["time", "run_s"] + b.hk_cols + list(STAT_KEYS)) + "\n")
+            row = {**vals, **{f"ch{c}_trg_rate": v for c, v in b.ch_rates.items()}}
+            cells = [f"{time.time():.3f}", f"{run_s:.3f}"] + [_cell(row.get(k)) for k in b.hk_cols] + [_cell(stats.get(k)) for k in STAT_KEYS]
+            b.hk_out.write(",".join(cells) + "\n")
+            b.hk_out.flush()
+            b.hk_rows += 1
+        except (OSError, ValueError) as err:
+            self.log(f"{b.name}: cannot write its housekeeping file {b.hk_file or folder}: {err}; its housekeeping is "
+                     "no longer written (the run goes on)", "warning")
+            f, b.hk_out = b.hk_out, False
+            if f:
+                try:
+                    f.close()
+                except (OSError, ValueError):
+                    pass
 
     def check_alarms(self, b: BoardRun, vals: dict) -> None:
         flags = vals.get("error_flags")
@@ -705,17 +890,25 @@ class Run:
                 b.temp_warned = False
 
     def write_set(self) -> None:
-        """live/combined.set: the newest cell that every board kept, one event of each (rawdata.pack_set)."""
+        """live/combined.set: the newest moment (timestamp cell) every board kept, one event of each
+        (rawdata.pack_set). The newest by arrival, not by the cell's number: after a timestamp reset the numbers
+        start small again."""
         picks = []
         for b in self.boards:
             with b.lock:
-                picks.append({p[0]: p for p in b.picks})
-        common = set(picks[0]).intersection(*picks[1:]) if picks else set()
-        if not common or max(common) == self.set_cell:
+                picks.append(list(b.picks))
+        if not picks or not all(picks):
             return
-        cell = self.set_cell = max(common)
-        chosen = [d[cell] for d in picks]
-        info = {"cell": cell, "chained": self.chained, "sync": self.cfg.run.sync, "time": time.time(),
+        others = [{p[0]: p for p in ps} for ps in picks[1:]]        # of a cell kept twice, the newer
+        first = next((p for p in reversed(picks[0]) if all(p[0] in d for d in others)), None)
+        if first is None:
+            return
+        key = (first[0], first[2])          # the cell and the first board's timestamp: also new when a reset repeats a cell
+        if key == self.set_cell:
+            return
+        self.set_cell = key
+        chosen = [first] + [d[first[0]] for d in others]
+        info = {"cell": first[0], "chained": self.chained, "sync": self.cfg.run.sync, "time": time.time(),
                 "boards": [{"name": b.name, "trigger_id": p[1], "timestamp": p[2], "size": len(p[3])}
                            for b, p in zip(self.boards, chosen)]}
         path = os.path.join(self.live_dir, "combined.set")
@@ -732,27 +925,34 @@ class Run:
         period = 1.0 / cfg.trigger.software_rate_hz if targets else None
         next_sw = time.monotonic() + (period or 0)
         next_hk = next_set = next_sync = 0.0
+        next_remind = time.monotonic() + START_REMIND_S
         hk_every = max(1.0, float(cfg.run.hk_s))
         while not self.stop_reason:
             now = time.monotonic()
+            started = self.mono_start is not None       # (a hardware start: from the master's first data)
             if self.stop_requested:
                 self.stop_reason = f"Stop ({self.stop_requested})"
-            elif cfg.run.duration_s and now - self.mono_start >= cfg.run.duration_s:
+            elif started and cfg.run.duration_s and now - self.mono_start >= cfg.run.duration_s:
                 self.stop_reason = "run time reached"
             elif cfg.run.max_events and self.boards[0].events >= cfg.run.max_events:
                 self.stop_reason = f"{cfg.run.max_events} events on {self.boards[0].name}"
-            elif any(b.state == "error" for b in self.boards):
+            elif any(b.state == "error" or b.ended == "error" for b in self.boards):
                 self.stop_reason = "a board failed"
+            elif any(b.stopped_itself for b in self.boards):
+                self.stop_reason = "a board stopped by itself"
+            elif self.level_ended:
+                self.stop_reason = f"the start signal of the master ended ({self.hw_start})"
             elif all(b.done for b in self.boards):
                 self.stop_reason = "every board stopped by itself"
             if self.stop_reason:
                 break
             if period is not None and now >= next_sw:
-                for k in targets:
-                    try:
-                        self.boards[k].board.cmd("SendSwTrigger")
-                    except BoardError as err:
-                        self.log(f"{self.boards[k].name}: {err}", "warning")
+                if started:
+                    for k in targets:
+                        try:
+                            self.boards[k].board.cmd("SendSwTrigger")
+                        except BoardError as err:
+                            self.log(f"{self.boards[k].name}: {err}", "warning")
                 next_sw += period
                 if now - next_sw > 1.0:             # far behind (a slow moment): do not send a burst
                     next_sw = now + period
@@ -767,8 +967,12 @@ class Run:
             if now >= next_set:
                 next_set = now + SET_S
                 self.write_set()
+            if not started and now >= next_remind:
+                next_remind = now + START_REMIND_S
+                self.log(f"still waiting for the master's start signal ({self.hw_start}), "
+                         f"{now - (self.armed_at or now):.0f} s after the arming")
             for b in self.boards:
-                if not b.warned_silent and b.last_data is None and now - self.mono_start > SILENT_WARN_S:
+                if started and not b.warned_silent and b.last_data is None and now - self.mono_start > SILENT_WARN_S:
                     b.warned_silent = True
                     b.message = "no data since the start"
                     self.log(f"{b.name}: no data {SILENT_WARN_S:g} s after the start: is it armed, and (in a chain) is "
@@ -780,9 +984,11 @@ class Run:
 
     def stop_all(self) -> None:
         self.set_phase("stopping")
-        for b in self.boards:
-            if b.state == "running":
-                b.state = "stopping"
+        with self._state_lock:
+            for b in self.boards:
+                if b.state == "running":
+                    b.state = "stopping"
+        self.stop_sent = True                   # a stop record from now on is the answer to this stop
         for k in C.start_order(self.cfg):
             b = self.boards[k]
             try:
@@ -790,36 +996,78 @@ class Run:
             except BoardError as err:
                 self.log(f"{b.name}: {err}", "warning")
         self.stopping_since = time.monotonic()
-        for b in self.boards:
-            while b.thread is not None and b.thread.is_alive():
-                b.thread.join(0.2)
-                self.status()
+        direct = False
+        while True:
+            alive = [b for b in self.boards if b.thread is not None and b.thread.is_alive()]
+            if not alive:
+                break
+            if not direct and time.monotonic() - self.stopping_since > STOP_WAIT_S:
+                # the stop did not reach these (a lost master, a failed stop command), or they are still sending: the
+                # stop and the disarm to each of them; its reader ends when it is quiet, at the latest STOP_LIMIT_S
+                direct = True
+                for b in alive:
+                    self.log(f"{b.name}: no stop record {STOP_WAIT_S:g} s after the stop: SwStopAcquisition and "
+                             "DisarmAcquisition sent to it directly", "warning")
+                    for command in ("SwStopAcquisition", "DisarmAcquisition"):
+                        try:
+                            b.board.cmd(command)
+                        except BoardError as err:
+                            self.log(f"{b.name}: {err}", "warning")
+            alive[0].thread.join(0.2)
+            self.status()
         self.write_set()                        # the last moment all boards have
         for b in self.boards:                   # the counters at the end
             self.sample_hk(b, time.monotonic())
         if self.sync is not None:
             self.check_sync(final=True)
             self.log(self.sync.summary(), "warning" if self.sync.out_of_sync or any(self.sync.missing) else "")
+        never = bool(self.hw_start) and self.mono_start is None
         for b in self.boards:
-            if b.ended == "time-out" and b.bytes == 0:
+            if b.ended == "time-out" and b.bytes == 0 and never:
+                self.log(f"{b.name} sent no data in this run: the master's start signal ({self.hw_start}) never came "
+                         "before the stop", "warning")
+            elif b.ended == "time-out" and b.bytes == 0:
                 self.log(f"{b.name} sent no data in this run: it did not start. Was it armed, and (in a chain) is its "
                          "CLK-IN cable from the board before it in place?", "warning")
+            elif b.still_sending:
+                self.log(f"{b.name}: still sending data {STOP_LIMIT_S:g} s after the stop: its reader was ended, so the "
+                         "end of its data is missing", "warning")
+            elif b.ended == "time-out" and self.kill_requested:
+                self.log(f"{b.name}: the second Stop ended its reader before its stop record: the end of its data may "
+                         "be missing", "warning")
             elif b.ended == "time-out":
                 self.log(f"{b.name}: no stop record within {STOP_WAIT_S:g} s after the stop; the end of its data may "
                          "be missing", "warning")
 
     def close_all(self) -> None:
+        """Disarm and close every board and its files, each step on its own: one failure (an error at the last
+        write of a file, a board that is gone) must not leave the others armed and open."""
         for b in self.boards:
+            reading = b.thread is not None and b.thread.is_alive()
             if b.board is not None:
                 try:
                     b.board.cmd("DisarmAcquisition")
                 except BoardError:
                     pass                        # it disarmed by itself (EnAutoDisarmAcq), or it is gone
-                b.board.close()
+                except Exception as err:
+                    self.log(f"{b.name}: cannot disarm it: {err!r}", "warning")
+                if reading:                     # never close a board during its reader's ReadData: the end of the
+                    self.log(f"{b.name}: its reader still runs: the connection closes when the program ends", "warning")
+                else:                           # program closes it
+                    try:
+                        b.board.close()
+                    except Exception as err:
+                        self.log(f"{b.name}: cannot close the connection: {err!r}", "warning")
             if b.writer is not None:
-                b.writer.close()
+                try:
+                    b.writer.close()
+                except Exception as err:        # the last data of the buffer did not reach the disk
+                    self.board_error(b, f"cannot close its data file: {err}; the end of its data may be missing")
             if b.hk_out:
-                b.hk_out.close()
+                try:
+                    b.hk_out.close()
+                except Exception as err:
+                    self.log(f"{b.name}: cannot close its housekeeping file: {err}", "warning")
 
     def summary(self) -> None:
         for b in self.boards:

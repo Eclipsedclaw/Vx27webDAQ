@@ -22,7 +22,8 @@ A data file of Vx27webDAQ, NAME.raw:
     4 bytes   zero
     L bytes   the header: JSON in UTF-8 (the board, its settings, the run), padded with spaces
     then the board's stream as it was read, buffer after buffer.
-A file that was cut (a crash, a full disk) ends inside an event: readers stop at the last complete event.
+A file that was cut (a crash, a full disk) ends inside an event, or in zeros (an event size of 0): readers stop at
+the last complete event and call the file truncated.
 
     python -m vx27webdaq.core.rawdata FILE.raw       what a file holds
 """
@@ -33,6 +34,7 @@ import json
 import mmap
 from array import array
 import os
+import re
 import struct
 import sys
 from dataclasses import dataclass, field
@@ -53,7 +55,7 @@ MAX_EVENT_WORDS = 1 << 31       # a size larger than this is not an event: the s
 
 
 class RawFormatError(ValueError):
-    """Bytes that are not a stream of the Scope firmware, or a file that is not an Vx27webDAQ data file."""
+    """Bytes that are not a stream of the Scope firmware, or a file that is not a Vx27webDAQ data file."""
 
 
 # ---- one event ----
@@ -136,11 +138,16 @@ def decode_scope(buf, offset: int = 0) -> ScopeEvent:
 
 def decode_special(buf, offset: int = 0) -> dict:
     """A special event: {"kind": "start", "acq_width", "n_traces", "decimation", "ch_mask"} or
-    {"kind": "stop", "time_tag", "dead_time"} (both in 8 ns), or {"kind": "other", "id"}."""
+    {"kind": "stop", "time_tag", "dead_time"} (both in 8 ns), or {"kind": "other", "id"}. RawFormatError when
+    its words are not all in buf."""
+    if len(buf) - offset < WORD:
+        raise RawFormatError("a special event shorter than its header")
     (w1,) = struct.unpack_from(">Q", buf, offset)
     if w1 >> 60 != FORMAT_SPECIAL:
         raise RawFormatError("not a special event")
     event_id, n_extra = (w1 >> 56) & 0xF, (w1 >> 32) & 0xFF
+    if (1 + n_extra) * WORD > len(buf) - offset:        # (struct would raise struct.error, which no caller expects)
+        raise RawFormatError(f"a special event with {n_extra} extra words that run past the end of the data")
     extra = struct.unpack_from(f">{n_extra}Q", buf, offset + WORD)
     data = [(x >> 56, x & ((1 << 56) - 1)) for x in extra]
     if event_id == SPECIAL_START and len(data) >= 3:
@@ -166,8 +173,8 @@ class Scan:
 
 def scan(buf, start: int = 0, end: int | None = None, offsets: list | None = None) -> Scan:
     """Walk the event headers from start: count the Scope events, keep the special ones. Stops at the end of
-    the last complete event; a header that cannot be one raises RawFormatError. offsets: a list that gets the
-    offset of every Scope event."""
+    the last complete event; a header that cannot be one (or a special event whose words are not all there)
+    raises RawFormatError, never struct.error. offsets: a list that gets the offset of every Scope event."""
     end = len(buf) if end is None else end
     out, o = Scan(end=start), start
     while end - o >= WORD:
@@ -178,6 +185,9 @@ def scan(buf, start: int = 0, end: int | None = None, offsets: list | None = Non
         if o + size > end:
             break
         if fmt == FORMAT_SCOPE:
+            if n_words < SCOPE_HEADER_WORDS:        # its timestamp and channel mask would be read from the next event
+                raise RawFormatError(f"a Scope event of {n_words} words at byte {o} (it has {SCOPE_HEADER_WORDS} "
+                                     "header words): the stream is broken")
             out.events += 1
             out.last_scope = o
             if offsets is not None:
@@ -264,7 +274,7 @@ def read_header(path: str) -> tuple[dict, int]:
     with open(path, "rb") as f:
         head = f.read(PREFIX)
         if len(head) < PREFIX or head[:8] != MAGIC:
-            raise RawFormatError(f"{os.path.basename(path)} is not an Vx27webDAQ data file")
+            raise RawFormatError(f"{os.path.basename(path)} is not a Vx27webDAQ data file")
         (n, _) = struct.unpack("<II", head[8:16])
         text = f.read(n)
     if len(text) < n:
@@ -274,6 +284,15 @@ def read_header(path: str) -> tuple[dict, int]:
     except ValueError as err:
         raise RawFormatError(f"{os.path.basename(path)}: the header is not JSON ({err})") from None
     return header, PREFIX + n
+
+
+NAME_PART_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+
+
+def name_part(value) -> str:
+    """value when it can be part of a file name (a run's or a board's name taken from a header), else "": letters,
+    digits and _ . - only, so a header naming its run "../x" cannot lead a file name out of the run's folder."""
+    return value if isinstance(value, str) and NAME_PART_RE.fullmatch(value) else ""
 
 
 class RawWriter:
@@ -287,6 +306,7 @@ class RawWriter:
         self.f = None
         self.size = 0
         self.total = 0              # bytes of data in all files
+        self.closed = False
 
     def _open(self) -> None:
         k = len(self.files)
@@ -302,8 +322,10 @@ class RawWriter:
             self.on_file(path)
 
     def write(self, data) -> None:
+        if self.closed:         # data after the end (a reader still going while the run closes): never a new part
+            raise ValueError(f"{os.path.basename(self.base)}: the data file is closed; nothing more is written")
         if self.f is None or (self.size and self.size + len(data) > self.max_bytes):
-            self.close()
+            self._close_file()
             self._open()
         self.f.write(data)
         self.size += len(data)
@@ -313,10 +335,14 @@ class RawWriter:
         if self.f is not None:
             self.f.flush()
 
+    def _close_file(self) -> None:
+        f, self.f = self.f, None
+        if f is not None:
+            f.close()
+
     def close(self) -> None:
-        if self.f is not None:
-            self.f.close()
-            self.f = None
+        self.closed = True
+        self._close_file()
 
 
 class RawFile:
@@ -352,12 +378,16 @@ class RawFile:
         while end - o >= WORD:
             (w,) = unpack(">Q", buf, o)
             n_words = w & 0xFFFFFFFF
-            if n_words == 0 or n_words > MAX_EVENT_WORDS:
+            if n_words == 0:
+                # a size of 0 is the zero-filled tail of a file cut by a crash or a full disk (the file system had
+                # made the file longer than the data that reached it): the file ends here, as a cut file does
+                break
+            size = n_words * WORD
+            if o + size > end:                  # cut inside an event
+                break
+            if n_words > MAX_EVENT_WORDS:
                 raise RawFormatError(f"{os.path.basename(self.path)}: an event of {n_words} words at byte "
                                      f"{self.data_start + o}: the file is broken there")
-            size = n_words * WORD
-            if o + size > end:
-                break
             fmt = w >> 60
             if fmt == FORMAT_SCOPE:
                 if n_words < SCOPE_HEADER_WORDS:
@@ -368,7 +398,11 @@ class RawFile:
                 w2s.append(w2)
                 w3s.append(w3)
             elif fmt == FORMAT_SPECIAL:
-                self.specials.append((o, decode_special(buf, o)))
+                try:
+                    special = decode_special(buf, o)
+                except RawFormatError:          # its extra words run past the end of the file: a cut tail too
+                    break
+                self.specials.append((o, special))
             o += size
         del buf
         self.complete_end = o

@@ -1,4 +1,4 @@
-"""The configuration of an Vx27webDAQ run, kept as a JSON file: the boards in the order of their chain (the first
+"""The configuration of a Vx27webDAQ run, kept as a JSON file: the boards in the order of their chain (the first
 is the master), how they are synchronized and triggered, each board's window and channels, and the run.
 
 plan(cfg, i) turns it into the exact CAEN FELib parameters for board i, in the order they are set. The
@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import re
 from dataclasses import asdict, dataclass, field, fields
@@ -70,7 +71,9 @@ DAC_CHOICES = ("Static", "Ramp", "Sin5MHz", "Square", "IPE", "ChInput", "MemOccu
 MAX_BOARDS = 32
 MAX_RECORD = 6_250_000          # WaveDump2's limit on the record length (samples)
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
+PART_RE = re.compile(r"_[0-9]{3}$")     # how the further files of a board end: RUN_b0_001.raw, RUN_b0_002.raw, ...
 EXTRA_RE = re.compile(r"^/(par|ch/[0-9]+(\.\.[0-9]+)?/par|endpoint/par)/[A-Za-z0-9_]+$")
+GROUPS = {"A": ("A",), "B": ("B",), "A_AND_B": ("A", "B"), "A_OR_B": ("A", "B")}    # the channel groups each board trigger uses
 
 
 class ConfigError(ValueError):
@@ -180,8 +183,9 @@ class Setting:
     path: str
     value: str
     why: str = ""
-    alt: list = field(default_factory=list)     # tried instead when the board does not know this parameter;
-                                                # once a name is refused, later settings of it are skipped
+    alt: list = field(default_factory=list)     # tried when the board refuses this setting: another value of the
+                                                # same parameter, or other parameters (older firmware); the rules
+                                                # are in daq/boards.py, send_setting
     optional: bool = False                      # a refusal is a warning, not the end of the run
 
 
@@ -233,13 +237,19 @@ def _num(v, where, kind=int, allow_none=False):
     if isinstance(v, bool):
         raise ConfigError(f"{where} must be a number")
     try:
+        # NaN, Infinity and numbers too large for a float (JSON reads 1e400 as Infinity) are no setting: float()
+        # takes them and every later comparison would be wrong, int() raises OverflowError or ValueError
+        if isinstance(v, float) and not math.isfinite(v):
+            raise ValueError(v)
         x = kind(v)
-    except (TypeError, ValueError):
+        if isinstance(x, float) and not math.isfinite(x):
+            raise ValueError(v)
+    except (TypeError, ValueError, OverflowError):
         raise ConfigError(f"{where} must be a number") from None
     if kind is int and isinstance(v, float) and v != int(v):
         raise ConfigError(f"{where} must be a whole number")
-    if kind is float and x != x:
-        raise ConfigError(f"{where} must be a number")
+    if kind is int and abs(x) >= 1 << 63:      # a whole number this large overflows float() in the check
+        raise ConfigError(f"{where} must be a number of a sensible size (this one has {len(str(abs(x)))} digits)")
     return x
 
 
@@ -273,8 +283,16 @@ def from_dict(data: dict) -> DaqConfig:
     boards = data.get("boards", [])
     if not isinstance(boards, list):
         raise ConfigError("boards must be a list")
-    for k, b in enumerate(boards[:MAX_BOARDS]):
+    if len(boards) > MAX_BOARDS:            # never cut silently: the run would lack boards the file names
+        raise ConfigError(f"the configuration has {len(boards)} boards, more than the {MAX_BOARDS} a run can have: "
+                          "remove some")
+    for k, b in enumerate(boards):
         board = _fill(Board, b, f"boards[{k}]")
+        # the name goes into file names (the data files, the board check's parameter tree): a name like "../x"
+        # must never be stored
+        if not NAME_RE.match(board.name):
+            raise ConfigError(f"boards[{k}].name: {board.name[:40]!r} is not a board name: use letters, digits, _ . - "
+                              "(at most 32), starting with a letter or digit")
         chans = b.get("channels", [])
         if not isinstance(chans, list):
             raise ConfigError(f"boards[{k}].channels must be a list")
@@ -302,7 +320,7 @@ def load_config(path: str) -> tuple[DaqConfig, str]:
     except ValueError as err:
         raise ConfigError(f"{os.path.basename(path)} is not JSON: {err}") from None
     if isinstance(data, dict) and data.get("format") not in (None, FORMAT):
-        raise ConfigError(f"{os.path.basename(path)} is not an Vx27webDAQ configuration")
+        raise ConfigError(f"{os.path.basename(path)} is not a Vx27webDAQ configuration")
     cfg = from_dict(data.get("config", data) if isinstance(data, dict) else data)
     note = data.get("note", "") if isinstance(data, dict) else ""
     return cfg, note if isinstance(note, str) else ""
@@ -352,6 +370,12 @@ def caen_clock_out_delay_ps(i: int, n: int) -> float:
 def sample_ns(board: Board, facts: models.Model | None = None) -> float:
     m = facts or models.model(board.model) or models.MODELS["2740"]
     return m.sample_ns * (board.decimation if m.decimation else 1)
+
+
+def branch_name(name: str) -> str:
+    """A board's name in the branch names of RUN_built.root (core/eventbuild.py): anything but letters, digits
+    and _ made _."""
+    return re.sub(r"[^A-Za-z0-9_]", "_", name)
 
 
 def event_bytes(board: Board) -> int:
@@ -550,9 +574,14 @@ def plan(cfg: DaqConfig, k: int, facts: models.Model | None = None) -> list[Sett
         for a, z, v in _ranges(["Rise" if c.positive else "Fall" for c in ch]):
             put(_ch(a, z, "SelfTriggerEdge"), v, "positive pulses" if v == "Rise" else "negative pulses")
         mask = sum(1 << c for c, x in enumerate(ch) if x.self_trigger and x.enabled and x.itl != "B")
+        mask_b = sum(1 << c for c, x in enumerate(ch) if x.self_trigger and x.enabled and x.itl == "B")
         connect = [(("ITLB" if x.itl == "B" else "ITLA") if x.self_trigger and x.enabled else "Disabled") for x in ch]
         groups = _ranges(connect)
+        # firmware without ITLConnect has a channel mask per logic instead; ITLBMask only when group B has channels,
+        # so that a firmware with ITLAMask alone still runs every setup without group B
         alt = [Setting("/par/ITLAMask", f"0x{mask:x}", "channels in the board trigger (older firmware)")]
+        if mask_b:
+            alt.append(Setting("/par/ITLBMask", f"0x{mask_b:x}", "channels in the board trigger, group B (older firmware)"))
         for j, (a, z, v) in enumerate(groups):
             put(_ch(a, z, "ITLConnect"), v, {"ITLA": "in the board trigger", "ITLB": "in the board trigger, group B"}.get(v, "not in the board trigger"),
                 alt=alt if j == 0 else [])
@@ -642,6 +671,10 @@ def check_config(cfg: DaqConfig, check_paths: bool = True, facts: dict | None = 
             err("run.data_dir", f"{d} does not exist (make it first)")
         elif not os.access(d, os.W_OK | os.X_OK):
             err("run.data_dir", f"the server cannot write in {d}")
+    if r.data_dir and not os.path.isabs(os.path.expanduser(r.data_dir)):
+        # the DAQ program runs in the run's folder, the server elsewhere: a relative folder is not the same for both
+        warn("run.data_dir", f"{r.data_dir} is not a whole path: the DAQ program would look for it in the run's folder; "
+                             "give the whole path, e.g. /NAS/ALAB_DAQ_DATA")
     if not r.write_raw:
         warn("run.write_raw", "the data are not kept: only the live view")
     if trg.setup not in SETUPS:
@@ -677,7 +710,7 @@ def check_config(cfg: DaqConfig, check_paths: bool = True, facts: dict | None = 
             err("trigger.test_pulse_period_ns", "must be from 16 ns to 10 s")
         elif not 8 <= trg.test_pulse_width_ns < trg.test_pulse_period_ns:
             err("trigger.test_pulse_width_ns", "must be at least 8 ns and shorter than the period")
-    if uses_self_trigger(cfg) and trg.logic == "Majority" and trg.majority < 1:
+    if uses_self_trigger(cfg) and "A" in GROUPS.get(trg.combine, ("A",)) and trg.logic == "Majority" and trg.majority < 1:
         err("trigger.majority", "must be 1 or more")
     if not 8 <= trg.gate_ns <= 10 ** 6:
         err("trigger.gate_ns", "must be from 8 ns to 1 ms")
@@ -685,16 +718,42 @@ def check_config(cfg: DaqConfig, check_paths: bool = True, facts: dict | None = 
         warn("run.sync", "independent boards run on their own clocks: their timestamps do not line up")
     if len(active) == 1 and r.sync == "chain":
         warn("run.sync", "one board: no chain is needed (it runs on its own)")
-    names, uris = set(), set()
+    names, lower, branches, uris = set(), {}, {}, set()
     windows = []
     place = {id(b): k for k, (_, b) in enumerate(active)}
+    on = [i for i, b in enumerate(cfg.boards) if b.enabled]
+    if r.sync == "chain" and len(on) > 1:
+        for i in range(on[0] + 1, on[-1]):
+            if not cfg.boards[i].enabled:
+                warn(f"boards[{i}].enabled", f"{cfg.boards[i].name} is switched off but sits between boards that are on. "
+                     "The CLK and TRG cables go through it: switched off, it breaks the chain; take it out of the chain "
+                     "or switch it on")
     for i, b in enumerate(cfg.boards):
         w = f"board {b.name or i + 1}"
-        if not NAME_RE.match(b.name or ""):
+        # the name goes into the file names (RUN_NAME.raw, RUN_NAME_001.raw, RUN_NAME.root) and the branch names of
+        # RUN_built.root: two boards must never come out the same there
+        name = b.name or ""
+        if not NAME_RE.match(name):
             err(f"boards[{i}].name", "a name of letters, digits, _ . - (at most 32), starting with a letter or digit")
-        elif b.name in names:
-            err(f"boards[{i}].name", f"{b.name} is used twice")
-        names.add(b.name)
+        elif name.lower() == "built":
+            err(f"boards[{i}].name", f"{name} is the name of the file with every board per trigger (RUN_built.root): "
+                                     "choose another name")
+        elif PART_RE.search(name):
+            err(f"boards[{i}].name", f"{name} ends in _ and 3 digits like the further files of a board "
+                                     "(RUN_b0_001.raw): choose a name without them at the end")
+        elif name in names:
+            err(f"boards[{i}].name", f"{name} is used twice")
+        elif name.lower() in lower:
+            err(f"boards[{i}].name", f"{name} and {lower[name.lower()]} differ only in upper and lower case: their files "
+                                     "would be one on disks that do not tell them apart (as many NAS shares); rename one")
+        elif branch_name(name) in branches:
+            err(f"boards[{i}].name", f"{name} and {branches[branch_name(name)]} are both {branch_name(name)} in the file "
+                                     "with every board per trigger (only letters, digits and _ are kept there); rename one")
+        names.add(name)
+        lower.setdefault(name.lower(), name)
+        branches.setdefault(branch_name(name), name)
+        if not b.enabled:       # a board switched off takes no part in the run: nothing else of it may stop one
+            continue
         if not b.uri.startswith(URI_SCHEMES) or len(b.uri) <= len("dig2://"):
             err(f"boards[{i}].uri", "the address is dig2://IP-ADDRESS or dig2://usb:PID")
         elif b.uri in uris:
@@ -711,8 +770,6 @@ def check_config(cfg: DaqConfig, check_paths: bool = True, facts: dict | None = 
             err(f"boards[{i}].n_channels", f"the board at {b.uri} said it has {fact['channels']} channels, not "
                                            f"{len(b.channels)} (Use what the boards said)")
         own = triggers_on_channels(cfg, place.get(id(b)))
-        if not b.enabled:
-            continue
         k = place.get(id(b))
         for field_, choices in (("io_trg_out", TRGOUT_CHOICES), ("io_gpio_out", GPIO_CHOICES), ("io_veto", VETO_CHOICES),
                                 ("io_veto_polarity", VETO_POLARITIES), ("io_start", START_CHOICES),
@@ -738,15 +795,6 @@ def check_config(cfg: DaqConfig, check_paths: bool = True, facts: dict | None = 
             err(f"boards[{i}].io_dac_channel", f"{w} has channels 0 to {len(b.channels) - 1}")
         if not 0 <= b.io_dac_level <= m.adc_max:
             err(f"boards[{i}].io_dac_level", f"must be from 0 to {m.adc_max}")
-        if own and trg.combine in ("A", "B"):
-            other = "B" if trg.combine == "A" else "A"
-            if any(c.enabled and c.self_trigger and c.itl == other for c in b.channels):
-                warn(f"boards[{i}].channels", f"some channels are in group {other}, but the board trigger uses only "
-                                                f"group {trg.combine}: they do not trigger")
-        if own and trg.combine in ("A_AND_B", "A_OR_B"):
-            for g in ("A", "B"):
-                if not any(c.enabled and c.self_trigger and c.itl == g for c in b.channels):
-                    warn(f"boards[{i}].channels", f"no channel is in group {g}: logic {g} never fires")
         if not 4 <= b.record_length <= MAX_RECORD:
             err(f"boards[{i}].record_length", f"must be from 4 to {MAX_RECORD:,} samples")
         elif b.record_length % 4:
@@ -779,11 +827,36 @@ def check_config(cfg: DaqConfig, check_paths: bool = True, facts: dict | None = 
             if ch.gain and not m.gain:
                 err(f"{cw}.gain", f"a {b.model} has no variable gain: use 0")
         if own:
-            trig = [c for c in b.channels if c.enabled and c.self_trigger]
-            if not trig:
+            # each channel logic sees only its own group (ITLConnect ITLA or ITLB, as plan() sets it): count them apart,
+            # and check a logic only when the board trigger uses it
+            count = {"A": 0, "B": 0}
+            for c in b.channels:
+                if c.enabled and c.self_trigger:
+                    count["B" if c.itl == "B" else "A"] += 1
+            uses = GROUPS.get(trg.combine, ("A",))
+            if not count["A"] + count["B"]:
                 err(f"boards[{i}].channels", f"{w}: no channel takes part in the board's trigger")
-            elif trg.logic == "Majority" and trg.majority > len(trig):
-                err("trigger.majority", f"{w} has only {len(trig)} triggering channels")
+            else:
+                for g in ("A", "B"):
+                    other = "B" if g == "A" else "A"
+                    if g not in uses:
+                        if count[g]:
+                            warn(f"boards[{i}].channels", f"some channels are in group {g}, but the board trigger uses "
+                                                            f"only group {other}: they do not trigger")
+                        continue
+                    logic, need = (trg.logic, trg.majority) if g == "A" else (trg.logic_b, trg.majority_b)
+                    if not count[g] and trg.combine == "A_OR_B":
+                        err(f"boards[{i}].channels", f"{w}: no triggering channel is in group {g}, so logic {g} of the "
+                                                       f"board trigger (A OR B) never fires: put channels in group {g}, "
+                                                       f"or let the board trigger use logic {other} alone")
+                    elif not count[g]:
+                        err(f"boards[{i}].channels", f"{w}: no triggering channel is in group {g}, which the board "
+                                                       f"trigger needs, so it never triggers: put channels in group "
+                                                       f"{g}, or choose another board trigger")
+                    elif logic == "Majority" and need > count[g]:
+                        err("trigger.majority" if g == "A" else "trigger.majority_b",
+                            f"{w} has only {count[g]} triggering channels in group {g}, fewer than the majority of "
+                            f"{need}: lower the majority or put more channels in group {g}")
         if b.run_delay_ns is not None and not 0 <= b.run_delay_ns <= 100_000:
             err(f"boards[{i}].run_delay_ns", "must be from 0 to 100000 ns")
         for j, (p, v) in enumerate(b.extra):

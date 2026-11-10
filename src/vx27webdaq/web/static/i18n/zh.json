@@ -643,6 +643,7 @@
  "in trigger": "参与触发",
  "incoming triggers (Hz)": "输入触发 (Hz)",
  "independent boards": "独立板卡",
+ "independent boards: no common clock": "独立板卡：没有共同时钟",
  "internal test pulse": "内部测试脉冲",
  "its channel trigger (ITLA)": "它的通道触发（ITLA）",
  "its channels (ITLA AND ITLB)": "自身通道（ITLA 与 ITLB）",

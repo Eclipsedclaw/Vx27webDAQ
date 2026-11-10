@@ -79,33 +79,86 @@ def number(value: str):
     return int(x) if x.is_integer() and abs(x) < 1 << 53 and "." not in text else x
 
 
-def housekeeping(board, wanted: dict | None = None) -> dict:
-    """The board's sensors, counters and error flags (HK); the keys it does not know are dropped from wanted."""
+def housekeeping(board, wanted: dict | None = None, seen: set | None = None) -> dict:
+    """The board's sensors, counters and error flags (HK). A key whose first reading fails is dropped from wanted
+    (the board does not have it); seen keeps the keys read once, whose later failures only leave them out of this
+    reading (a transient error must not lose a column for the rest of the run)."""
     wanted = dict(HK) if wanted is None else wanted
     out = {}
     for key, path in list(wanted.items()):
         try:
             out[key] = number(board.get(path))
         except BoardError:
-            wanted.pop(key, None)
+            if seen is None or key not in seen:
+                wanted.pop(key, None)
+            continue
+        if seen is not None:
+            seen.add(key)
     return out
 
 
 def channel_rates(board, channels: list[int], state: dict) -> dict:
-    """{channel: self-trigger rate (Hz)} of these channels; state[\"off\"] after the first refusal (the board's
-    firmware has no such counter): later calls ask nothing."""
+    """{channel: self-trigger rate (Hz)} of these channels. A channel whose first reading fails is not asked again
+    (a firmware without the counter: every channel once, then nothing); a channel read once before only misses
+    this reading. state keeps both, between the calls."""
     out = {}
-    if state.get("off"):
-        return out
+    off, seen = state.setdefault("off", set()), state.setdefault("seen", set())
     for c in channels:
+        if c in off:
+            continue
         try:
             v = number(board.get(CH_RATE.format(c=c)))
         except BoardError:
-            state["off"] = True
-            return {}
+            if c not in seen:
+                off.add(c)
+            continue
+        seen.add(c)
         if isinstance(v, (int, float)):
             out[c] = v
     return out
+
+
+def param_name(path: str) -> str:
+    """The parameter of a path, in lower case: /ch/0..15/par/ITLConnect -> itlconnect."""
+    return path.rsplit("/", 1)[-1].lower()
+
+
+def send_setting(board, s, refused: set, on_set=None, on_warning=None) -> None:
+    """Give the board one setting of config.plan() (a config.Setting) by the same rules for a run and for Send to
+    boards. on_set(setting) for each setting the board took, on_warning(text) for each refusal that is not fatal.
+    A setting the board refuses:
+      - optional, without alternatives: a warning; later settings of that parameter are skipped (refused has it);
+      - with alternatives: a warning, then each alternative by these rules. An alternative of the same parameter
+        (AcqTriggerSource ITLA|SwTrg -> ITLA) is another value: the parameter stays in use. When every alternative
+        is another parameter (ITLConnect -> ITLAMask, VetoSource -> BoardVetoSource), the board lacks this one:
+        refused gets its name, and a later setting of it sends only its own alternatives;
+      - anything else: BoardError, the end of this board's configuration."""
+    name = param_name(s.path)
+    alts = [a for a in s.alt if a.path]
+    if name in refused:                 # a parameter this board does not have: only what stands in for it
+        for a in alts:
+            send_setting(board, a, refused, on_set, on_warning)
+        return
+    try:
+        board.set(s.path, s.value)
+    except BoardError as err:
+        if not (s.optional or alts):
+            raise BoardError(f"the board refused {s.path} = {s.value}: {err}") from None
+        if not alts:
+            refused.add(name)
+            if on_warning:
+                on_warning(f"the board refused {s.path} = {s.value} ({err}); the run goes on without it")
+            return
+        if on_warning:
+            on_warning(f"the board refused {s.path} = {s.value} ({err}); sending instead "
+                       + ", ".join(f"{a.path} = {a.value}" for a in alts))
+        for a in alts:                  # first the alternatives (one may be this very parameter, with another value)
+            send_setting(board, a, refused, on_set, on_warning)
+        if all(param_name(a.path) != name for a in alts):
+            refused.add(name)
+        return
+    if on_set:
+        on_set(s)
 
 
 def monitors(board, wanted: dict | None = None) -> dict:

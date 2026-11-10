@@ -17,7 +17,12 @@ channels whose pulse passes their threshold) is met.
 Options (a string, as on the Settings page): --rate HZ (20), --share P (0.5), --amplitude COUNTS (600),
 --noise SIGMA (3), --seed N, and failures for the tests: --fail open:NAME, param:NAME:PARAM, read:NAME:N,
 nostop:NAME, unarmed:NAME (the board does not take the arm command), errflags:NAME:S (ErrorFlags 0x800 from S
-seconds into the run on).
+seconds into the run on), value:NAME:PARAM:TEXT (the board refuses a value of PARAM that contains TEXT, e.g.
+AcqTriggerSource ITLA|SwTrg for TEXT SwTrg, and takes the others), selfstop:NAME:S (the board stops by itself S
+seconds into the run: its stop record comes before the DAQ's stop).
+--sin A[:B] is the signal on S-IN of a board started by it (StartSource SINedge or SINlevel, the master's
+hardware start): high from A seconds after the board is armed, low again from B seconds on (SINlevel: the
+acquisition stops then, and with it the chain).
 --generator staircase turns the random hits into a pulse generator, to see clear waveforms: hits come
 regularly (--rate per second), and in every record each channel of every board has one pulse of the full
 --amplitude. A V2730: every channel at the same time, at the trigger, a fast negative pulse. A V2740/V2745: a
@@ -30,6 +35,7 @@ Housekeeping: the temperatures rise slowly while the board runs; TriggerCnt coun
 from __future__ import annotations
 
 import argparse
+import bisect
 import dataclasses
 import functools
 import math
@@ -227,12 +233,22 @@ def parse_options(text: str) -> argparse.Namespace:
     ap.add_argument("--spacing-us", type=float, default=5.0)
     ap.add_argument("--rise-us", type=float, default=5.0)
     ap.add_argument("--decay-us", type=float, default=1000.0)
+    ap.add_argument("--sin", default=None)
     try:
         args, rest = ap.parse_known_args(shlex.split(text or ""))
     except (argparse.ArgumentError, SystemExit) as err:
         raise ValueError(f"simulator options: {err}") from None
     if rest:
         raise ValueError(f"simulator options: not known: {' '.join(rest)}")
+    if args.sin is not None:
+        try:
+            parts = [float(x) for x in str(args.sin).split(":")]
+        except ValueError:
+            parts = []
+        if not 1 <= len(parts) <= 2 or parts[0] < 0 or (len(parts) == 2 and parts[1] <= parts[0]):
+            raise ValueError("simulator options: --sin is A or A:B, the seconds after the arming when S-IN goes high "
+                             "(and low again, B after A)")
+        args.sin = (parts[0], parts[1] if len(parts) == 2 else None)
     return args
 
 
@@ -357,6 +373,9 @@ class SimBoard:
         self.no_stop = crate.failing("nostop", name) is not None
         self.no_arm = crate.failing("unarmed", name) is not None
         self.err_after = next((float(f[2]) for f in crate.fails if f[0] == "errflags" and f[1] == name and len(f) > 2), None)
+        self.refused_values = [(f[2].lower(), ":".join(f[3:])) for f in crate.fails
+                               if f[0] == "value" and f[1] == name and len(f) > 3]
+        self.self_stop = next((float(f[2]) for f in crate.fails if f[0] == "selfstop" and f[1] == name and len(f) > 2), None)
         self.reads = 0
         self.reset()
 
@@ -367,7 +386,8 @@ class SimBoard:
         self.endpoint = "scope"
         self.armed = self.running = False
         self.t_start = self.t_stop = None
-        self.sw_times: list[float] = []
+        self.t_armed = None
+        self.sw_times: list[float] = []         # the software triggers while running, in time order
         self.produced_until = None
         self.sent_start = self.sent_stop = False
         self.trigger_id = 0
@@ -434,6 +454,8 @@ class SimBoard:
         table = self.cp if kind == "ch" else self.bp
         if name in self.refused or name not in table:
             raise BoardError(f"set {path} = {value}: no such parameter on this firmware (simulated)")
+        if any(name == p and text in str(value) for p, text in self.refused_values):
+            raise BoardError(f"set {path} = {value}: this value is not allowed on this firmware (simulated)")
         check = table[name][0]
         if check is None:
             raise BoardError(f"set {path}: read-only")
@@ -495,9 +517,11 @@ class SimBoard:
                 if self.endpoint != "raw":
                     raise BoardError("command ArmAcquisition: Vx27webDAQ reads the raw endpoint; activate it first")
                 self.armed = True
+                self.t_armed = now
                 self.produced_until = None
                 self.sent_start = self.sent_stop = False
                 self.t_start = self.t_stop = None
+                self.sw_times = []
                 self.trigger_id = 0
                 self.pending = bytearray()
             elif c == "disarmacquisition":
@@ -516,8 +540,34 @@ class SimBoard:
             elif c == "sendswtrigger":
                 if self.running:
                     self.sw_times.append(now)
+                    if len(self.sw_times) > 256:
+                        self._forget_sw()
             elif c == "cleardata":
                 self.pending = bytearray()
+
+    def _forget_sw(self) -> None:
+        """Forget the software triggers every board has produced past: a board asks for those after its own
+        produced_until only (its own, or the board before it on the TRG chain), so the list stays short in a long
+        run instead of growing by every trigger and being searched in full on every read."""
+        done = [b.produced_until for b in self.crate.boards if b.produced_until is not None]
+        if done:
+            del self.sw_times[:bisect.bisect_right(self.sw_times, min(done))]
+
+    def _hardware(self, now: float) -> None:
+        """What starts or stops the board without a command: the S-IN signal of --sin (StartSource SINedge or
+        SINlevel), and the failure selfstop."""
+        sin, src = self.crate.opt.sin, self.p("startsource").split("|")
+        if sin is not None and self.t_armed is not None and ("SINedge" in src or "SINlevel" in src):
+            on = self.t_armed + sin[0]
+            if self.t_start is None and self.armed and now >= on:
+                self.run_edge(True, on)
+                self.crate.run_signal(self, True, on)
+            if sin[1] is not None and "SINlevel" in src and self.running and now >= self.t_armed + sin[1]:
+                self.run_edge(False, self.t_armed + sin[1])
+                self.crate.run_signal(self, False, self.t_armed + sin[1])
+        if self.self_stop is not None and self.running and now >= self.t_start + self.self_stop:
+            self.run_edge(False, self.t_start + self.self_stop)
+            self.crate.run_signal(self, False, self.t_stop)
 
     def run_edge(self, on: bool, t: float) -> None:
         if on and self.armed and not self.running and self.t_start is None:
@@ -537,7 +587,7 @@ class SimBoard:
 
     # ---- this board's trigger sources ----
     def sw_between(self, t0, t1):
-        return [t for t in self.sw_times if t0 < t <= t1]
+        return self.sw_times[bisect.bisect_right(self.sw_times, t0):bisect.bisect_right(self.sw_times, t1)]
 
     def test_pulses(self, t0, t1):
         period = int(self.p("testpulseperiod")) * 1e-9
@@ -681,8 +731,10 @@ class SimBoard:
         deadline = time.monotonic() + timeout_ms / 1000
         while True:
             with self.crate.lock:
+                now = self.crate.now()
+                self._hardware(now)
                 if self.running or (self.t_stop is not None and not self.sent_stop):
-                    self._produce(self.crate.now())
+                    self._produce(now)
                 if self.pending:
                     cut = rawdata.scan(self.pending, 0, min(len(self.pending), MAX_RAW)).end
                     if cut == 0:                    # one event larger than a buffer: it goes alone

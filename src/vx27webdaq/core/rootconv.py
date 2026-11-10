@@ -21,7 +21,7 @@ Read in PyROOT: f = ROOT.TFile("NAME.root"); t = f.events; t.GetEntry(0); list(t
 
 The conversion prints "processed N %" lines, then reads the ROOT file back and prints
 "check: N events in the raw file, M in the ROOT file"; exit code 0 when they agree (trigger IDs and
-samples), 1 when they differ, 2 when a file cannot be read.
+samples), 1 when they differ, 2 when a file cannot be read or the conversion fails in any other way.
 """
 
 from __future__ import annotations
@@ -49,9 +49,11 @@ def side_note(raw_path: str, header: dict) -> str:
 
 
 def hk_path(raw_path: str, header: dict) -> str:
-    """The board's housekeeping file of this data file (one per board and run, beside the first data file)."""
-    board = (header.get("board") or {}).get("name", "")
-    return os.path.join(os.path.dirname(raw_path), f"{header.get('run', '')}_{board}_hk.csv")
+    """The board's housekeeping file of this data file (one per board and run, beside the first data file); "" when
+    the header's run or board name cannot be part of a file name (a run named "../x" must not lead elsewhere)."""
+    board = header.get("board") if isinstance(header.get("board"), dict) else {}
+    run, name = rawdata.name_part(header.get("run")), rawdata.name_part(board.get("name"))
+    return os.path.join(os.path.dirname(raw_path), f"{run}_{name}_hk.csv") if run and name else ""
 
 
 def read_hk(path: str) -> dict[str, np.ndarray]:
@@ -177,10 +179,14 @@ def main(argv: list[str] | None = None) -> int:
     t0 = time.monotonic()
     try:
         n = convert(raw, out, report)
+        size = os.path.getsize(out)
     except (OSError, rawdata.RawFormatError) as err:
         print(f"ERROR: {err}", flush=True)
         return 2
-    print(f"wrote {out}: {n} events in {time.monotonic() - t0:.1f} s ({os.path.getsize(out) / 1e6:.1f} MB)", flush=True)
+    except Exception as err:            # a crash (uproot, awkward, numpy, memory) is a failure, never exit code 1,
+        print(f"ERROR: the conversion failed: {err!r}", flush=True)     # which means "written, but it differs"
+        return 2
+    print(f"wrote {out}: {n} events in {time.monotonic() - t0:.1f} s ({size / 1e6:.1f} MB)", flush=True)
     try:
         n_raw, n_root, same, why = check(raw, out)
     except Exception as err:            # uproot raises many kinds for a damaged file

@@ -717,7 +717,7 @@ class PageTests(WebTestCase):
         used |= {"ok", "failed", "mismatch", "cancelled", "exists"}                                     # conversions
         used |= {"stop record", "time-out", "error"}                                                    # how a board ended
         used |= {"not read out", "no event", "not in this event", "no such board"}                       # combined view
-        used |= {"one board", "each board triggers by itself"}                                            # sync check
+        used |= {"one board", "each board triggers by itself", "independent boards: no common clock"}     # sync check
         cfg = C.default_config()
         for setup in C.SETUPS:                                          # the reasons in "What this board gets"
             for target in C.SOFTWARE_TARGETS:
