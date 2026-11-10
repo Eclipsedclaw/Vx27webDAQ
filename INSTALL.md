@@ -26,7 +26,7 @@ cd Vx27webDAQ
    ./caen_libs.sh                    # --jobs N, --with-boost DIR (see --help)
    ```
 
-   Or install CAEN FELib and CAEN Dig2 from CAEN's site and give their folder on the Settings page. Without them only the simulator runs.
+   Or install CAEN FELib and CAEN Dig2 from CAEN's site and give their folder on the Settings page (an admin does: its libraries run as the service account, so the folder, the folders above it and its files must belong to root or to that account and must not be writable by others; otherwise the folder is not used and the page says why). Without them only the simulator runs.
 
 3. The first build: it goes to `/opt/Vx27webDAQ` (with the CAEN libraries), adds the command `vx27webdaq`, installs the systemd service `vx27webdaq` that runs the server as the account you name (the one that writes the data folder), and makes the first admin account:
 
@@ -62,4 +62,5 @@ vMAJOR.MINOR.PATCH (on the page, top left; in `vx27webdaq --version`, `BUILD_INF
 | `src/vx27webdaq/daq/` | the DAQ program: one run of all boards, a board through CAEN FELib, the simulated boards | [daq/README.md](src/vx27webdaq/daq/README.md) |
 | `src/vx27webdaq/web/` | the server and the page | [web/README.md](src/vx27webdaq/web/README.md) |
 | `tests/` | automatic tests | [tests/README.md](tests/README.md) |
+| `docs/` | how it works, explained for kids (also copied into the build) | [docs/HOW_IT_WORKS_FOR_KIDS.md](docs/HOW_IT_WORKS_FOR_KIDS.md) |
 | `wheels/`, `VX27_ENV/`, `caen/` | made by `setup.sh` and `caen_libs.sh` (not in git) | |

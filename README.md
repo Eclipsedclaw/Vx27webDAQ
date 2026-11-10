@@ -16,7 +16,7 @@ git pull && sudo ./build.sh                         # every update (a run that i
 
 On Ubuntu 22.04 put `PYTHON=/usr/bin/python3.11` before `./setup.sh` and `./build.sh`. Accounts: `sudo -u ACCOUNT vx27webdaq user add NAME --role operator`. Everything else (requirements, the service, upgrading from ALAB DAQ, versions and git): [INSTALL.md](INSTALL.md).
 
-**State (v0.1.22, 2026-11-09):** complete and tested with simulated boards; **not yet tried on real boards** (none was reachable from the computer where it was built). See [What is verified](tests/README.md#what-is-verified-and-what-is-not).
+**State (v0.1.29, 2026-11-10):** complete and tested with simulated boards, also by a full system test (every trigger setup, odd requests to every route of the server, whole runs with restarts and board failures, a robot clicking every control); **not yet tried on real boards** (none was reachable from the computer where it was built). See [What is verified](tests/README.md#what-is-verified-and-what-is-not).
 
 ## Open the page
 
@@ -76,6 +76,8 @@ The file formats: [src/vx27webdaq/core/README.md](src/vx27webdaq/core/README.md)
 | "it has 32 channels; the configuration has 16" | **Use what the boards said** on the Configuration page |
 | "the board refused /par/…" | The firmware does not know that parameter or value: see the board's own list in Tools → Boards |
 | "… sent no data in this run: it did not start" | That board's CLK-IN cable, and the order of the boards (the first is the master) |
+| "… stopped by itself during the run" | That board ended its acquisition on its own, so the run was stopped: its CLK-IN cable from the board before it, its error flags (Tools → Board housekeeping), its network link |
+| *not used: …* under the CAEN library folder (Settings) | Other accounts could change that folder: an admin gives one that only root or the service account can change (the build's own `caen/lib` is) |
 | A red ROOT line | The `.raw` file is fine: see `rootconv.log` in the run folder and convert it again in Tools |
 
-More: [how a run works, the trigger setups and the real boards](src/vx27webdaq/daq/README.md) · [tests](tests/README.md) · [what changed](CHANGELOG.md)
+More: [how a run works, the trigger setups and the real boards](src/vx27webdaq/daq/README.md) · [tests](tests/README.md) · [what changed](CHANGELOG.md) · [how it works, explained for kids](docs/HOW_IT_WORKS_FOR_KIDS.md)

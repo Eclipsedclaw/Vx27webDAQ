@@ -5,6 +5,11 @@ What changed in each version of Vx27webDAQ (ALAB DAQ until v0.0.18). Write the n
 
 ## Unreleased
 
+## v0.1.29 (2026-11-10)
+
+- Documents for the system test fixes: the READMEs say what changed: event building by time, the stop, the board lock, versioned configuration edits, what Save refuses, the CAEN library folder (admins), data folders and conversions, the sign-in rules. The main README's "If something goes wrong" has two more rows.
+- New: `docs/HOW_IT_WORKS_FOR_KIDS.md`, how the program works explained for kids (the boards, the programs, the folders, a run, how to use it, words to know, how bugs are hunted), linked from the README; `build.sh` copies `docs/` into the build.
+
 ## v0.1.28 (2026-11-10)
 
 - Paths too long for a file system: a request whose path no file can have (a name too long, or too many links in a row) is refused with a message (400), on every route; it was a server error (500). The repeated system test found it, after the fixes.
