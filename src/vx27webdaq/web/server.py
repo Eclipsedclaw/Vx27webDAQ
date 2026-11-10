@@ -9,6 +9,7 @@ custom header, and no foreign Origin). Each action then needs its role: see acco
 from __future__ import annotations
 
 import asyncio
+import errno
 import functools
 import ipaddress
 import json
@@ -54,6 +55,14 @@ SECURITY_HEADERS = {
 ERRORS = [(PermissionError, 403), (FileNotFoundError, 404), (RunError, 409), (ConvertError, 409), (CheckError, 409),
           (ConfigError, 400), (AccountError, 400), (RawFormatError, 400), (IndexError, 400), (ValueError, 400),
           (IsADirectoryError, 400), (NotADirectoryError, 400), (OSError, 500)]
+BAD_PATH = {errno.ENAMETOOLONG, errno.ELOOP}    # a path given that no file can have: the request's fault, not the server's
+
+
+def error_status(err: Exception) -> int:
+    """The HTTP status of an error a handler raised (one of ERRORS)."""
+    if isinstance(err, OSError) and err.errno in BAD_PATH:
+        return 400
+    return next(code for e, code in ERRORS if isinstance(err, e))
 
 
 # ---- JSON both ways: the browser takes no NaN or Infinity (JSON has no such numbers) ----
@@ -177,8 +186,7 @@ def api(level: str = "viewer"):
             except web.HTTPException:
                 raise
             except tuple(e for e, _ in ERRORS) as err:
-                status = next(code for e, code in ERRORS if isinstance(err, e))
-                return fail(status, str(err) or type(err).__name__)
+                return fail(error_status(err), str(err) or type(err).__name__)
             return result if isinstance(result, web.StreamResponse) else json_response(result)
         return run
     return wrap

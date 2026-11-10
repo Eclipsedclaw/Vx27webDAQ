@@ -155,6 +155,10 @@ class RequestTests(FixTestCase):
         self.assertEqual(r.status, 400)                                  # no path (it was IsADirectoryError: 500)
         r = await self.client.post("/api/config/open", json={"path": self.root}, headers=CHANGE)
         self.assertEqual(r.status, 400)                                  # a folder
+        long = os.path.join(self.root, "x" * 300)                        # the system test's fuzz (after the fixes): 500
+        for path, body in (("/api/config/open", {"path": long}), ("/api/config/save", {"path": long + ".json"})):
+            r = await self.client.post(path, json=body, headers=CHANGE)
+            self.assertEqual(r.status, 400, (path, await r.text()))     # a name too long for any file system
         spec = {"kind": "repeat", "count": 2, "duration_s": 1}
         for bad in ({"duration_s": [1, 2]}, {"duration_s": {"a": 1}}, {"count": [3]}, {"count": "x"},
                     {"kind": "scan", "target": "threshold", "values": [{"a": 1}]},

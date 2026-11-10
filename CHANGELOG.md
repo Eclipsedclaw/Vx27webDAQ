@@ -5,6 +5,10 @@ What changed in each version of Vx27webDAQ (ALAB DAQ until v0.0.18). Write the n
 
 ## Unreleased
 
+## v0.1.28 (2026-11-10)
+
+- Paths too long for a file system: a request whose path no file can have (a name too long, or too many links in a row) is refused with a message (400), on every route; it was a server error (500). The repeated system test found it, after the fixes.
+
 ## v0.1.27 (2026-11-10)
 
 - System test fixes, the page: the 39 defects that a robot clicking every control (in English, Chinese and Japanese) and a review found in the page are fixed. Each fix was checked by a scripted run in headless Chromium, and the integrated page once more by the robot.
