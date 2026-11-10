@@ -334,7 +334,7 @@ class RunTests(WebTestCase):
             return os.path.exists(built) and not self.station.converter.busy()
         await self.wait(built_ready, 60, "the event-built ROOT file")
         with open(os.path.join(run_dir, "run.json"), encoding="utf-8") as f:
-            self.assertEqual(json.load(f)["root_files"]["built"]["status"], "ok")
+            self.assertEqual(json.load(f)["built"]["status"], "ok")      # its own key, not among the data files
         r = await self.client.get("/api/files/info", params={"path": built})
         self.assertEqual(r.status, 400)                                  # not one board's file
         ex = await self.client.get("/api/files/export", params={"path": files[1], "first": 1, "count": 2, "channels": "0,1"})
@@ -705,7 +705,7 @@ class PageTests(WebTestCase):
         """Every text of the page that goes through t() or is marked T() has a Chinese and a Japanese translation
         with the same {values}, and so has
         every word the server sends for the page to show (states, statuses, roles, the parameters' reasons)."""
-        js = "".join(open(p, encoding="utf-8").read() for p in glob.glob(str(STATIC / "js" / "**" / "*.js"), recursive=True))
+        js = "".join(p.read_text(encoding="utf-8") for p in (STATIC / "js").rglob("*.js"))
         langs = {}
         for name in ("zh", "ja"):                                       # Chinese and Japanese
             with open(STATIC / "i18n" / f"{name}.json", encoding="utf-8") as f:
@@ -714,7 +714,11 @@ class PageTests(WebTestCase):
                 for _, text in re.findall(r"""\b[tT]\(\s*(["'])((?:\\.|(?!\1).)*)\1""", js)}
         from vx27webdaq.web.accounts import ROLES
         used |= set(ROLES) | {"data", "runs", "home", "configuration", "CAEN libraries", "computer"}     # chooser places
-        used |= {"ok", "failed", "mismatch", "cancelled", "exists"}                                     # conversions
+        used |= {"ok", "failed", "mismatch", "cancelled", "exists", "skipped"}                          # conversions
+        server = "".join(p.read_text(encoding="utf-8") for p in STATIC.parent.glob("*.py"))
+        actions = set(re.findall(r"""\.activity\(\s*[^,()]+,\s*"([^"]*)\"""", server))                # the activity log
+        self.assertGreater(len(actions), 30)
+        used |= actions | {f"run ended: {phase}" for phase in ("finished", "failed")}
         used |= {"stop record", "time-out", "error"}                                                    # how a board ended
         used |= {"not read out", "no event", "not in this event", "no such board"}                       # combined view
         used |= {"one board", "each board triggers by itself", "independent boards: no common clock"}     # sync check

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -74,19 +75,86 @@ class ServerSettings:
         return (self.simulator_options or "") + extra
 
     def lib_env(self) -> dict:
-        """The environment for programs that use CAEN FELib: its folder first on LD_LIBRARY_PATH."""
+        """The environment for programs that use CAEN FELib: its folder first on LD_LIBRARY_PATH, but only a folder
+        no other account can change (unsafe_lib_dir): else it is left out and the boards say that CAEN FELib
+        cannot be loaded, and the Settings page says why."""
         env = {}
         d = os.path.expanduser(self.caen_lib_dir.strip())
-        if d:
+        if d and unsafe_lib_dir(d) is None:
             old = os.environ.get("LD_LIBRARY_PATH", "")
             env["LD_LIBRARY_PATH"] = d + (":" + old if old else "")
         return env
+
+
+def inside(path: str, folder: str) -> bool:
+    """path is folder or lies inside it (both real paths)."""
+    folder = folder.rstrip("/")
+    return not folder or path == folder or path.startswith(folder + "/")
+
+
+def _changeable_by_others(path: str, st: os.stat_result, sticky_ok: bool) -> str | None:
+    owners = (0, os.geteuid())
+    if st.st_uid not in owners:
+        return f"{path} belongs to another account (uid {st.st_uid})"
+    if st.st_mode & 0o022 and not (sticky_ok and st.st_mode & stat.S_ISVTX):
+        return f"{path} may be changed by other accounts (its group or everyone may write in it)"
+    return None
+
+
+def _folder_chain(path: str) -> str | None:
+    """Why someone else could change this folder (or, when it is not there yet, make it), or a folder above it."""
+    p = path
+    while not os.path.exists(p) and p != os.path.dirname(p):
+        p = os.path.dirname(p)
+    first = p
+    while True:
+        try:
+            st = os.stat(p)
+        except OSError as err:
+            return f"{p} cannot be looked at ({err.strerror})"
+        why = _changeable_by_others(p, st, sticky_ok=p != first)     # e.g. /tmp above it: others cannot rename in it
+        if why:
+            return why
+        if p == os.path.dirname(p):
+            return None
+        p = os.path.dirname(p)
+
+
+def unsafe_lib_dir(path: str) -> str | None:
+    """Why the CAEN library folder must not go into LD_LIBRARY_PATH, or None. Every library in that folder is loaded
+    before the system's by the DAQ program and the board check, so whoever may change the folder, a file in it or a
+    folder above it could run their own code as the service account: each must belong to root or to the service
+    account, and must not be writable by its group or by everyone (a folder above it with the sticky bit is fine)."""
+    if not path.strip():
+        return None
+    real = os.path.realpath(os.path.abspath(os.path.expanduser(path.strip())))
+    why = _folder_chain(real)
+    if why or not os.path.isdir(real):
+        return why
+    try:
+        entries = list(os.scandir(real))
+    except OSError as err:
+        return f"{real} cannot be read ({err.strerror})"
+    for e in entries:
+        try:
+            st = os.stat(e.path)                # through a link: the file it points to
+        except OSError:
+            continue
+        why = _changeable_by_others(e.path, st, sticky_ok=False)
+        if not why and e.is_symlink():
+            why = _folder_chain(os.path.dirname(os.path.realpath(e.path)))
+        if why:
+            return why
+    return None
 
 
 # what each setting is, for the Settings page; "admin": only admins may change it
 SETTING_KINDS = {"config_file": "file", "caen_lib_dir": "folder", "runs_dir": "folder", "data_dirs": "folders",
                  "use_simulator": "bool", "simulator_options": "text", "simulator_pulses": "choice", "convert_to_root": "bool", "build_events": "bool", "refresh_ms": "int",
                  "guests": "admin"}
+# only admins change these: whether guests may look in, and the CAEN library folder (it goes into LD_LIBRARY_PATH
+# of every DAQ program and board check, so it decides what code runs as the service account)
+ADMIN_SETTINGS = ("guests", "caen_lib_dir")
 
 
 SETTING_CHOICES = {"simulator_pulses": ["", "staircase"]}
@@ -97,32 +165,41 @@ def settings_path() -> Path:
 
 
 def coerce(name: str, value, default):
-    """value as the type of the setting's default; ValueError if it cannot be."""
+    """value as the type of the setting's default; ValueError (with a message to show) if it cannot be."""
     if isinstance(default, bool):
         if isinstance(value, bool):
             return value
-        if str(value).lower() in ("1", "true", "yes", "on"):
+        if isinstance(value, (str, int)) and str(value).lower() in ("1", "true", "yes", "on"):
             return True
-        if str(value).lower() in ("0", "false", "no", "off"):
+        if isinstance(value, (str, int)) and str(value).lower() in ("0", "false", "no", "off"):
             return False
         raise ValueError(f"{name} must be true or false")
     if isinstance(default, int):
-        number = int(value)
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise ValueError(f"{name} must be a whole number")
+        try:
+            number = int(value)
+        except (ValueError, OverflowError):
+            raise ValueError(f"{name} must be a whole number") from None
         if name == "refresh_ms" and not 100 <= number <= 5000:
             raise ValueError("refresh_ms must be from 100 to 5000")
         return number
     if isinstance(default, list):
         if isinstance(value, str):
             value = [line for line in value.splitlines()]
-        return [str(v).strip() for v in value if str(v).strip()]
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise ValueError(f"{name}: one folder per line (text), or a list of folders")
+        return [v.strip() for v in value if v.strip()]
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be text")
     if name in SETTING_CHOICES:
-        if str(value) not in SETTING_CHOICES[name]:
+        if value not in SETTING_CHOICES[name]:
             raise ValueError(f"{name} is one of {', '.join(repr(c) for c in SETTING_CHOICES[name])}")
-        return str(value)
+        return value
     if name == "simulator_options":
         from vx27webdaq.daq.sim import parse_options
-        parse_options(str(value))           # ValueError for options the simulator does not take
-    return str(value).strip()
+        parse_options(value)                # ValueError for options the simulator does not take
+    return value.strip()
 
 
 def load_settings(path: Path | None = None) -> ServerSettings:

@@ -47,10 +47,13 @@ def serve(args) -> int:
         os.environ.setdefault(var, "1")
     from aiohttp import web
 
-    from vx27webdaq.web.server import create_app
+    from vx27webdaq.web.server import create_app, is_loopback
     app = create_app()
     station = app["station"]
     print(f"Vx27webDAQ web v{__version__}: http://{args.host}:{args.port}  (server account: {getpass.getuser()})")
+    if not (args.host == "localhost" or is_loopback(args.host)):
+        print(f"WARNING: --host {args.host} listens on the network, but the server answers only requests from this "
+              "computer itself: the others are refused. Use the default 127.0.0.1 and ssh -L.", file=sys.stderr)
     print(f"On your computer: ssh -L {args.port}:localhost:{args.port} {socket.gethostname()}, then open http://localhost:{args.port}")
     if not station.accounts.names():
         print("No accounts yet: make the first admin with  vx27webdaq user add NAME --role admin")
@@ -72,13 +75,13 @@ def user(args) -> int:
         print(f"added {name} ({args.role})")
     elif args.action == "password":
         acc.set_password(args.name, _password(args))
-        print(f"new password for {args.name}")
+        print(f"new password for {args.name}: every browser signed in as {args.name} is signed out")
     elif args.action == "role":
         acc.set_role(args.name, args.role)
         print(f"{args.name} is {args.role} now")
     elif args.action == "remove":
         acc.remove(args.name)
-        print(f"removed {args.name}")
+        print(f"removed {args.name}: every browser signed in as {args.name} is signed out")
     return 0
 
 

@@ -87,7 +87,9 @@ def check_new_password(password: str) -> None:
 
 
 class Accounts:
-    """users.json: {name: {role, hash, created, changed, last_login}}."""
+    """users.json: {name: {role, hash, created, changed, last_login, pw_changed}}. pw_changed (Unix time) is
+    when the account was made or its password last set: a sign-in from before it no longer counts, so a new
+    password (here or on the command line) and a removed account sign every browser out."""
 
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -147,8 +149,26 @@ class Accounts:
         """True if name has this password. Unknown names take as long, so a guess learns nothing."""
         self._reload()
         user = self._users.get((name or "").strip().lower())
-        ok = check_password(password or "", user["hash"] if user else _DUMMY_HASH)
-        return bool(user) and ok
+        stored = user.get("hash") if user else None
+        ok = check_password(password or "", stored if isinstance(stored, str) else _DUMMY_HASH)
+        return bool(user) and isinstance(stored, str) and ok
+
+    def valid_since(self, name: str | None) -> float | None:
+        """A sign-in of this account counts only if it was made at or after this time (its password's), else None
+        (an account of an older version, without the time: every sign-in counts)."""
+        if not name:
+            return None
+        self._reload()
+        user = self._users.get(name)
+        t = user.get("pw_changed") if user else None
+        return float(t) if isinstance(t, (int, float)) and not isinstance(t, bool) else None
+
+    def mtime(self) -> int | None:
+        """When users.json changed last (the command line changes it too), None when there is none."""
+        try:
+            return self.path.stat().st_mtime_ns
+        except OSError:
+            return None
 
     # ---- changing ----
     def add(self, name: str, password: str, role: str = "viewer") -> str:
@@ -160,7 +180,8 @@ class Accounts:
             if name in self._users:
                 raise AccountError(f"{name} exists already")
             now = time.strftime("%Y-%m-%d %H:%M:%S")
-            self._users[name] = {"role": role, "hash": hash_password(password), "created": now, "changed": now}
+            self._users[name] = {"role": role, "hash": hash_password(password), "created": now, "changed": now,
+                                 "pw_changed": time.time()}     # an old sign-in of a removed account of this name ends
         return name
 
     def set_password(self, name: str, password: str) -> None:
@@ -168,6 +189,7 @@ class Accounts:
         with self._locked():
             self._get(name)["hash"] = hash_password(password)
             self._users[name]["changed"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            self._users[name]["pw_changed"] = time.time()    # every sign-in made before ends
 
     def set_role(self, name: str, role: str) -> None:
         if role not in ROLES:
@@ -222,15 +244,17 @@ class Sessions:
         self.save()
         return token
 
-    def user(self, token: str | None) -> str | None:
-        """The account signed in with this token, or None (also once it has expired)."""
+    def user(self, token: str | None, valid_since=None) -> str | None:
+        """The account signed in with this token, or None (also once it has expired). valid_since(name): the
+        time before which a sign-in of that account no longer counts (its password changed), or None."""
         if not token:
             return None
         key, now = self._key(token), time.time()
         s = self._by_hash.get(key)
         if s is None:
             return None
-        if now - s["seen"] > SESSION_IDLE_S or now - s["created"] > SESSION_MAX_S:
+        since = valid_since(s["name"]) if valid_since is not None else None
+        if now - s["seen"] > SESSION_IDLE_S or now - s["created"] > SESSION_MAX_S or (since is not None and s["created"] < since):
             del self._by_hash[key]
             self.save()
             return None

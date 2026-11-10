@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import ipaddress
+import json
+import math
 import os
 import re
 import time
@@ -21,7 +24,8 @@ from aiohttp import WSMsgType, web
 from vx27webdaq import __version__
 from vx27webdaq.core.config import ConfigError
 from vx27webdaq.core.rawdata import RawFormatError
-from vx27webdaq.web.accounts import SESSION_MAX_S, AccountError, rank
+from vx27webdaq.web.accounts import NAME as ACCOUNT_NAME
+from vx27webdaq.web.accounts import RESERVED, SESSION_MAX_S, AccountError, rank
 from vx27webdaq.web.boardcheck import CheckError
 from vx27webdaq.web.converter import ConvertError
 from vx27webdaq.web.files import ALIGNS, MAX_TRACES, Y_UNITS, browse
@@ -34,8 +38,13 @@ LOCAL_NAMES = {"localhost", "127.0.0.1", "::1"}
 OPEN_PATHS = {"/api/me", "/api/login"}          # reachable when guests are off and nobody is signed in
 LOGIN_FAILS_BEFORE_PAUSE = 5
 LOGIN_PAUSE_S = 30
+LOGIN_FAIL_MEMORY_S = 3600      # wrong passwords of a name are forgotten after an hour without one
+LOGIN_FAIL_NAMES = 1000         # at most this many names are remembered (the oldest go first)
+VERIFY_AT_ONCE = 2              # password checks at the same time (each takes about 16 MB and 50 ms)
 MAX_CHANNELS_ASKED = 64
+MAX_CHANNEL_PARTS = 64          # channels=...: at most this many comma-separated parts
 EXPORT_MAX_EVENTS = 1000
+MAX_INT_DIGITS = 30             # a number in a request has at most this many digits
 SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; "
                                "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",
@@ -44,7 +53,58 @@ SECURITY_HEADERS = {
 
 ERRORS = [(PermissionError, 403), (FileNotFoundError, 404), (RunError, 409), (ConvertError, 409), (CheckError, 409),
           (ConfigError, 400), (AccountError, 400), (RawFormatError, 400), (IndexError, 400), (ValueError, 400),
-          (OSError, 500)]
+          (IsADirectoryError, 400), (NotADirectoryError, 400), (OSError, 500)]
+
+
+# ---- JSON both ways: the browser takes no NaN or Infinity (JSON has no such numbers) ----
+def _finite(obj):
+    """obj with every NaN and infinite float made None."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _finite(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_finite(v) for v in obj]
+    return obj
+
+
+def dumps(obj) -> str:
+    """JSON for the page: a value that is not a finite number (e.g. NaN in a board's statistics, an infinite
+    value in an old draft) becomes null, so one bad number can never make the whole answer unreadable."""
+    try:
+        return json.dumps(obj, allow_nan=False)
+    except ValueError:
+        return json.dumps(_finite(obj), allow_nan=False)
+
+
+def json_response(data, status: int = 200) -> web.Response:
+    return web.json_response(data, status=status, dumps=dumps)
+
+
+class BodyError(ValueError):
+    """A request body the server does not take (the message says why)."""
+
+
+def _no_constant(name: str):
+    raise BodyError(f"the request has {name}, which is not a number: send numbers only")
+
+
+def _finite_float(text: str) -> float:
+    x = float(text)
+    if not math.isfinite(x):
+        raise BodyError(f"the request has the number {text[:20]}, which is too large")
+    return x
+
+
+def _small_int(text: str) -> int:
+    if len(text.lstrip("-")) > MAX_INT_DIGITS:
+        raise BodyError(f"the request has a number with more than {MAX_INT_DIGITS} digits")
+    return int(text)
+
+
+def loads(text: str):
+    """JSON of a request, refusing NaN, Infinity, 1e999 and numbers of thousands of digits."""
+    return json.loads(text, parse_constant=_no_constant, parse_float=_finite_float, parse_int=_small_int)
 
 
 def fail(status: int, message: str) -> web.Response:
@@ -57,18 +117,38 @@ def host_name(host: str) -> str:
     return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
 
 
+def is_loopback(remote: str | None) -> bool:
+    """True for an address of this computer itself (127.0.0.0/8, ::1, ::ffff:127.x)."""
+    try:
+        ip = ipaddress.ip_address((remote or "").split("%", 1)[0])
+    except ValueError:
+        return False
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_loopback
+
+
+def identify(st: Station, token: str | None) -> tuple[str | None, str | None]:
+    """(account, role) of the browser with this sign-in token: (None, "viewer") for a guest while guests are
+    allowed, (None, None) for nobody. A sign-in older than the account's last password change counts for nothing."""
+    name = st.sessions.user(token, st.accounts.valid_since)
+    role = st.accounts.role(name)
+    if role is None:
+        name = None
+    return name, role or ("viewer" if st.settings.guests else None)
+
+
 @web.middleware
 async def guard(request: web.Request, handler):
     if host_name(request.host or "") not in LOCAL_NAMES:
         return fail(403, "open the page as http://localhost:PORT (through ssh -L)")
+    if not is_loopback(request.remote):          # e.g. --host 0.0.0.0: another computer, with "Host: localhost"
+        return fail(403, "this server answers only to this computer: open it through ssh -L PORT:localhost:PORT")
     st: Station = request.app["station"]
     token = request.cookies.get(COOKIE)
-    name = st.sessions.user(token)
-    role = st.accounts.role(name)
-    if role is None:
-        name = None
+    name, role = identify(st, token)
     request["user"], request["token"] = name, token if name else None
-    request["role"] = role or ("viewer" if st.settings.guests else None)
+    request["role"] = role
     if request.method not in ("GET", "HEAD", "OPTIONS"):
         origin = request.headers.get("Origin")
         if request.headers.get("X-VX27") != "1" or (origin and urlsplit(origin).netloc != request.host):
@@ -99,19 +179,41 @@ def api(level: str = "viewer"):
             except tuple(e for e, _ in ERRORS) as err:
                 status = next(code for e, code in ERRORS if isinstance(err, e))
                 return fail(status, str(err) or type(err).__name__)
-            return result if isinstance(result, web.StreamResponse) else web.json_response(result)
+            return result if isinstance(result, web.StreamResponse) else json_response(result)
         return run
     return wrap
 
 
 async def body(request: web.Request) -> dict:
     try:
-        data = await request.json()
+        data = await request.json(loads=loads)
+    except BodyError:
+        raise
+    except RecursionError:
+        raise ValueError("the request is nested too deeply") from None
     except ValueError:
-        raise ValueError("the request is not JSON")
+        raise ValueError("the request is not JSON") from None
     if not isinstance(data, dict):
         raise ValueError("the request is not a JSON object")
     return data
+
+
+def text_field(data: dict, key: str, default: str = "") -> str:
+    """data[key] as text: absent or null gives default; any other type is refused."""
+    value = data.get(key)
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be text")
+    return value
+
+
+async def threaded(func, *args) -> web.Response:
+    """func(*args) and its JSON in a worker thread: a large answer (every sample of 16 channels, a run's
+    combined view) must not hold up the event loop and every other page."""
+    def work():
+        return dumps(func(*args))
+    return web.Response(text=await asyncio.to_thread(work), content_type="application/json")
 
 
 def me(request: web.Request) -> dict:
@@ -141,21 +243,24 @@ def span_query(request: web.Request) -> tuple[int, int] | None:
 
 
 def channels_query(request: web.Request) -> list[int]:
-    """channels=0,1,5-7 -> [0, 1, 5, 6, 7] (at most 64)."""
+    """channels=0,1,5-7 -> [0, 1, 5, 6, 7] (at most 64). Every number is checked before a range is filled in,
+    so "0-999999999" is refused at once instead of making a list of a billion numbers."""
     text = request.query.get("channels", "0-7")
-    out: list[int] = []
-    for part in text.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" in part:
-            a, b = part.split("-", 1)
-            out += list(range(int(a), int(b) + 1))
-        else:
-            out.append(int(part))
-    if any(c < 0 or c > 63 for c in out):
-        raise ValueError("channels are 0-63")
-    return sorted(set(out))[:MAX_CHANNELS_ASKED]
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    if len(parts) > MAX_CHANNEL_PARTS:
+        raise ValueError(f"channels: at most {MAX_CHANNEL_PARTS} parts, e.g. 0-7,12")
+    out: set[int] = set()
+    for part in parts:
+        a, dash, b = part.partition("-")
+        try:
+            lo = int(a)
+            hi = int(b) if dash else lo
+        except ValueError:
+            raise ValueError(f"channels: {part[:20]} is not a channel or a range such as 5-7") from None
+        if not (0 <= lo <= 63 and 0 <= hi <= 63):
+            raise ValueError("channels are 0-63")
+        out.update(range(lo, hi + 1))
+    return sorted(out)[:MAX_CHANNELS_ASKED]
 
 
 TRACE_BOARD = re.compile(r"^[A-Za-z0-9_.-]{1,40}$")
@@ -205,21 +310,52 @@ async def get_me(request):
     return web.json_response(me(request))
 
 
+def _forget_old_fails(fails: dict, now: float) -> None:
+    """Names whose pause is over and whose last wrong password is an hour old are forgotten; at most
+    LOGIN_FAIL_NAMES names are kept (the ones tried longest ago go first)."""
+    for key in [k for k, (_, until, last) in fails.items() if now >= until and now - last > LOGIN_FAIL_MEMORY_S]:
+        del fails[key]
+    if len(fails) > LOGIN_FAIL_NAMES:
+        for key in sorted(fails, key=lambda k: fails[k][2])[:len(fails) - LOGIN_FAIL_NAMES]:
+            del fails[key]
+
+
+def _count_try(fails: dict, name: str) -> web.Response | None:
+    """Count a password try of this name before it is checked, so tries sent at the same time are all counted:
+    the 5th wrong one in a row pauses the name for 30 s. A 429 answer while the pause lasts, else None."""
+    now = time.time()
+    _forget_old_fails(fails, now)
+    count, until, _ = fails.get(name, (0, 0.0, 0.0))
+    if now < until:
+        return fail(429, f"too many wrong passwords: try again in {int(until - now) + 1} s")
+    count += 1
+    fails[name] = (count, now + LOGIN_PAUSE_S if count >= LOGIN_FAILS_BEFORE_PAUSE else 0.0, now)
+    return None
+
+
+def set_session_cookie(response: web.Response, token: str) -> web.Response:
+    response.set_cookie(COOKIE, token, httponly=True, samesite="Strict", path="/", max_age=SESSION_MAX_S)
+    return response
+
+
 async def login(request: web.Request) -> web.Response:
     st: Station = request.app["station"]
     try:
         data = await body(request)
     except ValueError as err:
         return fail(400, str(err))
-    name = str(data.get("name", "")).strip().lower()
+    name, password = data.get("name"), data.get("password")
+    name = name.strip().lower() if isinstance(name, str) else ""
+    password = password if isinstance(password, str) else ""
+    if not ACCOUNT_NAME.match(name) or name in RESERVED:     # never an account: no check, no entry in the log
+        return fail(401, "wrong user name or password")
     fails = request.app["login_fails"]
-    count, until = fails.get(name, (0, 0.0))
-    if time.time() < until:
-        return fail(429, f"too many wrong passwords: try again in {int(until - time.time()) + 1} s")
-    ok = await asyncio.to_thread(st.accounts.verify, name, str(data.get("password", "")))
+    paused = _count_try(fails, name)
+    if paused is not None:
+        return paused
+    async with request.app["verify_slots"]:
+        ok = await asyncio.to_thread(st.accounts.verify, name, password)
     if not ok:
-        count += 1
-        fails[name] = (count, time.time() + LOGIN_PAUSE_S if count >= LOGIN_FAILS_BEFORE_PAUSE else 0.0)
         st.activity(None, "failed sign-in", name)
         await asyncio.sleep(0.5)
         return fail(401, "wrong user name or password")
@@ -227,9 +363,7 @@ async def login(request: web.Request) -> web.Response:
     token = st.sessions.create(name)
     st.accounts.touch_login(name)
     st.activity(name, "signed in")
-    response = web.json_response({"user": name, "role": st.accounts.role(name)})
-    response.set_cookie(COOKIE, token, httponly=True, samesite="Strict", path="/", max_age=SESSION_MAX_S)
-    return response
+    return set_session_cookie(json_response({"user": name, "role": st.accounts.role(name)}), token)
 
 
 async def logout(request: web.Request) -> web.Response:
@@ -237,9 +371,20 @@ async def logout(request: web.Request) -> web.Response:
     if request["user"]:
         st.activity(request["user"], "signed out")
     st.sessions.end(request.cookies.get(COOKIE))
+    st.recheck_clients()                # this browser's live connection goes on as a guest, or is closed
     response = web.json_response({"ok": True})
     response.del_cookie(COOKIE, path="/")
     return response
+
+
+def _new_password_signin(st: Station, name: str, old_token: str | None, response: web.Response) -> web.Response:
+    """After the password of the account signed in here changed: every other browser of it is signed out, and
+    this one gets a new sign-in (the old one is older than the new password, so it no longer counts); this
+    browser's open live connections go on with the new one."""
+    st.sessions.end_user(name)
+    token = st.sessions.create(name)
+    st.move_clients(old_token, token)
+    return set_session_cookie(response, token)
 
 
 @api("viewer")
@@ -248,12 +393,22 @@ async def change_password(request):
     if not request["user"]:
         raise PermissionError("sign in first")
     data = await body(request)
-    if not await asyncio.to_thread(st.accounts.verify, request["user"], str(data.get("old", ""))):
+    old, new = text_field(data, "old"), text_field(data, "new")
+    name = request["user"]
+    paused = _count_try(request.app["password_fails"], name)
+    if paused is not None:
+        return paused
+    async with request.app["verify_slots"]:
+        ok = await asyncio.to_thread(st.accounts.verify, name, old)
+    if not ok:
+        await asyncio.sleep(0.5)
         raise PermissionError("the present password is not right")
-    await asyncio.to_thread(st.accounts.set_password, request["user"], str(data.get("new", "")))
-    st.sessions.end_user(request["user"], keep=request["token"])
-    st.activity(request["user"], "changed own password")
-    return {"ok": True}
+    request.app["password_fails"].pop(name, None)
+    await asyncio.to_thread(st.accounts.set_password, name, new)
+    response = _new_password_signin(st, name, request["token"], json_response({"ok": True}))
+    st.activity(name, "changed own password")
+    st.recheck_clients()
+    return response
 
 
 @api("admin")
@@ -265,9 +420,10 @@ async def list_users(request):
 async def add_user(request):
     st: Station = request.app["station"]
     data = await body(request)
-    name = await asyncio.to_thread(st.accounts.add, str(data.get("name", "")), str(data.get("password", "")),
-                                   str(data.get("role", "viewer")))
-    st.activity(request["user"], "added an account", f"{name} ({data.get('role', 'viewer')})")
+    role = text_field(data, "role", "viewer")
+    name = await asyncio.to_thread(st.accounts.add, text_field(data, "name"), text_field(data, "password"), role)
+    st.activity(request["user"], "added an account", f"{name} ({role})")
+    st.recheck_clients()
     return {"users": st.accounts.listing()}
 
 
@@ -277,14 +433,24 @@ async def change_user(request):
     name, data = request.match_info["name"], await body(request)
     if st.accounts.role(name) is None:
         raise FileNotFoundError(f"there is no account {name}")
-    if "role" in data:
-        st.accounts.set_role(name, str(data["role"]))
-        st.activity(request["user"], "changed a role", f"{name}: {data['role']}")
-    if data.get("password"):
-        await asyncio.to_thread(st.accounts.set_password, name, str(data["password"]))
-        st.sessions.end_user(name, keep=request["token"] if name == request["user"] else None)
-        st.activity(request["user"], "set a new password", name)
-    return {"users": st.accounts.listing()}
+    role, password = data.get("role"), data.get("password")
+    if role is not None and not isinstance(role, str) or password is not None and not isinstance(password, str):
+        raise ValueError("role and password must be text")
+    response = None
+    try:
+        if role is not None:
+            st.accounts.set_role(name, role)
+            st.activity(request["user"], "changed a role", f"{name}: {role}")
+        if password:
+            await asyncio.to_thread(st.accounts.set_password, name, password)
+            st.sessions.end_user(name)
+            if name == request["user"]:             # an admin's own: this browser stays signed in
+                response = _new_password_signin(st, name, request["token"],
+                                                json_response({"users": st.accounts.listing()}))
+            st.activity(request["user"], "set a new password", name)
+    finally:
+        st.recheck_clients()                        # the pages open with this account follow the change
+    return response or {"users": st.accounts.listing()}
 
 
 @api("admin")
@@ -294,6 +460,7 @@ async def remove_user(request):
     st.accounts.remove(name)
     st.sessions.end_user(name)
     st.activity(request["user"], "removed an account", name)
+    st.recheck_clients()
     return {"users": st.accounts.listing()}
 
 
@@ -318,19 +485,35 @@ async def events(request: web.Request):
         raise PermissionError("the live events are for the Vx27webDAQ page only")
     ws = web.WebSocketResponse(heartbeat=25, max_msg_size=1 << 16)
     await ws.prepare(request)
-    client = st.add_client(request["user"], request["role"])
+    client = st.add_client(request["user"], request["role"], request.cookies.get(COOKIE))
+
+    async def hello() -> None:
+        await ws.send_str(dumps({"type": "hello", "me": me(request), "state": st.state()}))
 
     async def pump():
-        await ws.send_json({"type": "hello", "me": me(request), "state": st.state()})
-        while True:
-            message = await client.queue.get()
-            if client.overflow:
-                client.overflow = False
-                while not client.queue.empty():
-                    client.queue.get_nowait()
-                await ws.send_json({"type": "hello", "me": me(request), "state": st.state()})
-                continue
-            await ws.send_json(message)
+        try:
+            await hello()
+            while True:
+                message = await client.queue.get()
+                if client.overflow or message.get("type") == st.RECHECK:
+                    overflow, client.overflow = client.overflow, False
+                    if overflow:                    # too far behind: the whole state anew
+                        while not client.queue.empty():
+                            client.queue.get_nowait()
+                    # who is this browser now (an account removed, its role or password changed, signed out,
+                    # guests turned off)? Nobody: the connection ends (4401: the page asks to sign in)
+                    user, role = identify(st, client.token)
+                    if role is None:
+                        await ws.close(code=4401, message=b"sign in")
+                        return
+                    if overflow or (user, role) != (client.user, client.role):
+                        client.user, client.role = user, role
+                        request["user"], request["role"] = user, role
+                        await hello()
+                    continue
+                await ws.send_str(dumps(message))
+        except (ConnectionResetError, RuntimeError):     # the page went away while a message was sent
+            return
 
     sender = asyncio.create_task(pump())
     try:
@@ -346,7 +529,7 @@ async def events(request: web.Request):
 # ---- the run ----
 @api("operator")
 async def run_preview(request):
-    return request.app["station"].runs.preview()
+    return await threaded(request.app["station"].runs.preview)      # it looks at the data folder (the NAS)
 
 
 @api("operator")
@@ -409,11 +592,10 @@ async def run_kill(request):
 @api("operator")
 async def boards_check(request):
     st: Station = request.app["station"]
-    if st.boards.running:
-        raise CheckError("a check is going already")
-    if st.runs.active is not None:
-        raise CheckError("not during a run: the run's own table shows the boards")
-    request.app["background"].add(asyncio.create_task(st.boards.check(request["user"])))
+    plan = st.boards.begin_check(request["user"])        # refused at once when the boards are not free
+    task = asyncio.create_task(st.boards.run_check(request["user"], plan))
+    request.app["background"].add(task)
+    task.add_done_callback(request.app["background"].discard)
     return {"ok": True}
 
 
@@ -429,12 +611,30 @@ async def get_config(request):
     return request.app["station"].config_payload()
 
 
+def conflict(st: Station, data: dict) -> web.Response | None:
+    """An edit that started from an older version of the configuration than the one the server has now (someone
+    else saved an edit meanwhile): 409 with the configuration as it is now, so the page can show it. Without
+    "base" an edit is taken as it comes."""
+    base = data.get("base")
+    if base is None:
+        return None
+    if isinstance(base, bool) or not isinstance(base, int):
+        raise ValueError("base is the version number of the configuration the edit started from")
+    if base != st.cfg_version:
+        return json_response({"error": "the configuration was changed by someone else meanwhile", "conflict": True,
+                              "current": st.config_payload()}, status=409)
+    return None
+
+
 @api("operator")
 async def put_note(request):
     st: Station = request.app["station"]
     data = await body(request)
     if not isinstance(data.get("note"), str):
         raise ValueError("note must be text")
+    refused = conflict(st, data)
+    if refused is not None:
+        return refused
     st.set_note(data["note"], request["user"])
     return st.config_payload()
 
@@ -443,6 +643,9 @@ async def put_note(request):
 async def put_config(request):
     st: Station = request.app["station"]
     data = await body(request)
+    refused = conflict(st, data)
+    if refused is not None:
+        return refused
     st.set_config(data.get("config") or {}, request["user"])
     return st.config_payload()
 
@@ -451,14 +654,18 @@ async def put_config(request):
 async def config_save(request):
     st: Station = request.app["station"]
     data = await body(request)
-    return {"path": st.save_config(data.get("path") or None, request["user"]), **st.config_payload()}
+    path = text_field(data, "path").strip()
+    return {"path": st.save_config(path or None, request["user"]), **st.config_payload()}
 
 
 @api("operator")
 async def config_open(request):
     st: Station = request.app["station"]
     data = await body(request)
-    st.open_config(str(data.get("path", "")), request["user"])
+    path = text_field(data, "path").strip()
+    if not path:
+        raise ValueError("give the path of the configuration file to open")
+    st.open_config(path, request["user"])
     return st.config_payload()
 
 
@@ -487,7 +694,12 @@ async def get_settings(request):
 async def put_settings(request):
     st: Station = request.app["station"]
     data = await body(request)
-    st.update_settings(data.get("changes") or {}, request["user"], rank(request["role"]) >= 3)
+    changes = data.get("changes")
+    if changes is None:
+        changes = {}
+    if not isinstance(changes, dict):
+        raise ValueError("changes must be an object: {setting: new value}")
+    st.update_settings(changes, request["user"], rank(request["role"]) >= 3)
     return st.settings_payload()
 
 
@@ -504,88 +716,102 @@ async def browse_folder(request):
 @api("viewer")
 async def files_list(request):
     st: Station = request.app["station"]
-    folder = request.query.get("dir") or st.default_folder() or (st.data_roots()[0][1] if st.data_roots() else "")
-    return {"roots": [{"label": a, "path": b} for a, b in st.data_roots()],
-            **await asyncio.to_thread(st.files.listing, folder)}
+    roots = st.data_roots()
+    folder = request.query.get("dir") or st.default_folder() or (roots[0][1] if roots else "")
+    if not folder:
+        raise FileNotFoundError("there is no data folder yet: an operator adds one in the Settings (data folders)")
+    return {"roots": [{"label": a, "path": b} for a, b in roots], **await asyncio.to_thread(st.files.listing, folder)}
 
 
 @api("viewer")
 async def files_info(request):
     st: Station = request.app["station"]
-    return await asyncio.to_thread(st.files.info, request.query.get("path", ""))
+    return await threaded(st.files.info, request.query.get("path", ""))
 
 
 @api("viewer")
 async def files_waveforms(request):
     st: Station = request.app["station"]
-    return await asyncio.to_thread(st.files.waveforms, request.query.get("path", ""), int_query(request, "event", 0, 0),
-                                   channels_query(request), int_query(request, "x0", 0, 0),
-                                   int_query(request, "x1", None, 0), int_query(request, "bins", 800, 16, 4000),
-                                   span_query(request), request.query.get("full") == "1")
+    return await threaded(st.files.waveforms, request.query.get("path", ""), int_query(request, "event", 0, 0),
+                          channels_query(request), int_query(request, "x0", 0, 0),
+                          int_query(request, "x1", None, 0), int_query(request, "bins", 800, 16, 4000),
+                          span_query(request), request.query.get("full") == "1")
 
 
 @api("viewer")
 async def files_overview(request):
     st: Station = request.app["station"]
-    return await asyncio.to_thread(st.files.overview, request.query.get("path", ""))
+    return await threaded(st.files.overview, request.query.get("path", ""))
 
 
 @api("viewer")
 async def live_waveforms(request):
     st: Station = request.app["station"]
-    return st.runs.live_waveforms(request.query.get("board", ""), channels_query(request), int_query(request, "x0", 0, 0),
-                                  int_query(request, "x1", None, 0), int_query(request, "bins", 800, 16, 4000),
-                                  int_query(request, "since", None), span_query(request), request.query.get("full") == "1")
+    # in a worker thread, with its JSON: with full=1 sixteen channels of 64 k samples are some 25 MB of JSON
+    return await threaded(st.runs.live_waveforms, request.query.get("board", ""), channels_query(request),
+                          int_query(request, "x0", 0, 0), int_query(request, "x1", None, 0),
+                          int_query(request, "bins", 800, 16, 4000), int_query(request, "since", None),
+                          span_query(request), request.query.get("full") == "1")
 
 
 @api("viewer")
 async def live_combined(request):
     st: Station = request.app["station"]
-    return await asyncio.to_thread(st.runs.live_combined, traces_query(request), float_query(request, "t0"),
-                                   float_query(request, "t1"), int_query(request, "bins", 800, 16, 4000),
-                                   choice_query(request, "y", Y_UNITS), choice_query(request, "align", ALIGNS),
-                                   int_query(request, "since", None))
+    return await threaded(st.runs.live_combined, traces_query(request), float_query(request, "t0"),
+                          float_query(request, "t1"), int_query(request, "bins", 800, 16, 4000),
+                          choice_query(request, "y", Y_UNITS), choice_query(request, "align", ALIGNS),
+                          int_query(request, "since", None))
 
 
 @api("viewer")
 async def files_combined(request):
     st: Station = request.app["station"]
-    return await asyncio.to_thread(st.files.combined, request.query.get("path", ""), int_query(request, "event", 0, 0),
-                                   traces_query(request), float_query(request, "t0"), float_query(request, "t1"),
-                                   int_query(request, "bins", 800, 16, 4000), choice_query(request, "y", Y_UNITS),
-                                   choice_query(request, "align", ALIGNS))
+    return await threaded(st.files.combined, request.query.get("path", ""), int_query(request, "event", 0, 0),
+                          traces_query(request), float_query(request, "t0"), float_query(request, "t1"),
+                          int_query(request, "bins", 800, 16, 4000), choice_query(request, "y", Y_UNITS),
+                          choice_query(request, "align", ALIGNS))
 
 
 @api("viewer")
 async def live_hk(request):
     st: Station = request.app["station"]
-    return await asyncio.to_thread(st.runs.live_hk)
+    return await threaded(st.runs.live_hk)
 
 
 @api("viewer")
 async def files_hk(request):
     st: Station = request.app["station"]
-    return await asyncio.to_thread(st.files.hk, request.query.get("path", ""))
+    return await threaded(st.files.hk, request.query.get("path", ""))
 
 
 @api("viewer")
 async def live_boards(request):
-    return {"boards": request.app["station"].runs.live_boards()}
+    return request.app["station"].runs.live_boards()
 
 
 @api("viewer")
 async def live_overview(request):
-    return request.app["station"].runs.live_overview()
+    return await threaded(request.app["station"].runs.live_overview)
 
 
 # ---- ROOT ----
+def user_folder(st: Station, who: str) -> str:
+    return os.path.join(st.settings.runs_folder(), "users", who.replace("/", "_"), "convert")
+
+
 @api("viewer")
 async def root_convert(request):
     st: Station = request.app["station"]
     data = await body(request)
-    raw = st.files.check(str(data.get("path", "")))
-    who = request["user"] or "guest"
-    workdir = os.path.join(st.settings.runs_folder(), "users", who.replace("/", "_"), "convert")
+    path, who = text_field(data, "path"), request["user"] or "guest"
+    workdir = user_folder(st, who)
+
+    def files():                        # in a worker thread: the files may be on the NAS
+        raw = st.files.check(path)
+        st.converter.check_request(raw)
+        os.makedirs(workdir, exist_ok=True)
+        return raw
+    raw = await asyncio.to_thread(files)
     st.converter.request(raw, workdir, who)
     st.activity(request["user"], "asked for a ROOT conversion", raw)
     return st.converter.status()
@@ -595,22 +821,54 @@ async def root_convert(request):
 async def root_build(request):
     st: Station = request.app["station"]
     data = await body(request)
-    raw = st.files.check(str(data.get("path", "")))
-    who = request["user"] or "guest"
-    workdir = os.path.join(st.settings.runs_folder(), "users", who.replace("/", "_"), "convert")
-    out = st.converter.request_build(raw, workdir, who)
+    path, who = text_field(data, "path"), request["user"] or "guest"
+    workdir = user_folder(st, who)
+
+    def files():
+        raw = st.files.check(path)
+        out = st.converter.check_build(raw)         # RUN_built.root: only a run's name from the header ...
+        st.files.check(out, want="new")             # ... and inside a data folder
+        os.makedirs(workdir, exist_ok=True)
+        return raw, out
+    raw, out = await asyncio.to_thread(files)
+    st.converter.request_build(raw, workdir, who)
     st.activity(request["user"], "asked for the run's events in one ROOT file", out)
     return {**st.converter.status(), "out": out}
 
 
 @api("viewer")
 async def files_export(request):
+    """Events of a data file as a text file, sent while it is made (one event at a time, in a worker thread), one
+    export at a time on the server."""
     st: Station = request.app["station"]
     path = request.query.get("path", "")
     first, count = int_query(request, "first", 0, 0), int_query(request, "count", 1, 1, EXPORT_MAX_EVENTS)
-    text, name = await asyncio.to_thread(st.files.export_text, path, first, count, channels_query(request))
-    return web.Response(text=text, content_type="text/plain", charset="utf-8",
-                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+    channels = channels_query(request)
+    lock: asyncio.Lock = request.app["export_lock"]
+    if lock.locked():
+        return fail(409, "another text export is being made: try again when it is done")
+    async with lock:
+        export = await asyncio.to_thread(st.files.export_open, path, first, count, channels)
+        try:
+            response = web.StreamResponse(headers={"Content-Type": "text/plain; charset=utf-8",
+                                                   "Content-Disposition": f'attachment; filename="{export.name}"'})
+            await response.prepare(request)
+            chunks = export.chunks()
+            try:
+                while True:
+                    text = await asyncio.to_thread(next, chunks, None)
+                    if text is None:
+                        break
+                    await response.write(text.encode("utf-8"))
+                await response.write_eof()
+            except (ConnectionResetError, RawFormatError, IndexError, OSError) as err:   # sent in part: end it there
+                try:
+                    await response.write(f"\n# the export ended here: {err}\n".encode("utf-8"))
+                except (ConnectionResetError, RuntimeError, OSError):
+                    pass
+            return response
+        finally:
+            export.close()
 
 
 @api("operator")
@@ -625,7 +883,10 @@ async def root_cancel(request):
 def create_app(station: Station | None = None) -> web.Application:
     app = web.Application(middlewares=[guard], client_max_size=4 << 20)
     app["station"] = station or Station()
-    app["login_fails"] = {}
+    app["login_fails"] = {}             # name -> (wrong tries in a row, paused until, last try)
+    app["password_fails"] = {}          # the same for "change your password" (the present one asked)
+    app["verify_slots"] = asyncio.Semaphore(VERIFY_AT_ONCE)
+    app["export_lock"] = asyncio.Lock()         # one text export at a time
     app["background"] = set()
     app["index"] = (STATIC / "index.html").read_text(encoding="utf-8").replace("{{version}}", __version__)
     app.on_response_prepare.append(security_headers)

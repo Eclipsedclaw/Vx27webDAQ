@@ -11,12 +11,15 @@ run, so the note of NAME.json next to the file counts when it is there.
 
 from __future__ import annotations
 
+import io
 import json
 import math
 import os
+import re
 import stat
 import threading
 from collections import OrderedDict
+from contextlib import contextmanager
 
 import numpy as np
 
@@ -32,6 +35,9 @@ SUMMARY_EVENTS = 200
 MAX_TRACES = 16                 # the combined view: at most this many channels in one plot
 Y_UNITS = ("mv", "adc", "raw")    # mV from the baseline, ADC counts from the baseline, raw ADC counts
 ALIGNS = ("trigger", "timestamp")  # time 0: each board's own trigger, or the first board's (timestamps)
+RUN_NAME = re.compile(r"^run\d{5,}$")  # a run's name, as the DAQ program makes it (file names are made from it)
+DEFAULT_SYNC_WINDOW_NS = 1000     # the combined view of files: the other boards' events within this time
+EXPORT_MAX_SAMPLES = 20_000_000   # a text export holds at most this many samples
 
 
 class FileAccessError(PermissionError):
@@ -207,7 +213,11 @@ HK_ROWS = 2000                  # the most readings a housekeeping table sends (
 
 def hk_table(path: str, max_rows: int = HK_ROWS) -> dict:
     """A board's housekeeping file for the page: its columns, thinned to max_rows readings (the last kept)."""
-    cols = rootconv.read_hk(path)
+    return hk_columns(path, rootconv.read_hk(path), max_rows)
+
+
+def hk_columns(path: str, cols: dict, max_rows: int = HK_ROWS) -> dict:
+    """Housekeeping columns (from the CSV file or a ROOT file's hk tree) for the page, thinned to max_rows readings."""
     n = len(next(iter(cols.values()))) if cols else 0
     keep = np.unique(np.concatenate([np.arange(0, n, max(1, math.ceil(n / max_rows))), [n - 1]])) if n else np.zeros(0, int)
     out = {}
@@ -277,59 +287,146 @@ def _side_note(path: str) -> str | None:
         return None
 
 
+def _clean_board(h) -> dict:
+    """The "board" part of a data file's header with every value of the type the page expects (a file of another
+    program, or a damaged one, may hold anything there)."""
+    out: dict = {}
+    if not isinstance(h, dict):
+        return out
+    for k, v in h.items():
+        if k in ("record_length", "pre_trigger", "adc_bits", "channels", "index", "decimation"):
+            if isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 1 << 40:
+                out[k] = v
+        elif k in ("sample_ns", "adc_msps"):
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0:
+                out[k] = float(v)
+        elif k in ("name", "model", "serial", "fw_type", "fw_version", "uri", "role", "cup"):
+            out[k] = v if isinstance(v, str) else None
+        elif isinstance(v, (str, int, float, bool)) or v is None:
+            out[k] = v
+    return out
+
+
 class OpenFile:
-    """A data file opened for the page: .raw (core.rawdata) or .root (uproot), with its header."""
+    """A data file opened for the page: .raw (core.rawdata) or .root (uproot), with its header. users and retired
+    belong to DataFiles: a file is closed only when it is out of the cache and no request uses it any more."""
 
     def __init__(self, path: str):
         st = os.stat(path)
+        if not stat.S_ISREG(st.st_mode):
+            raise FileAccessError(f"{os.path.basename(path)} is not a data file (a folder or a special file)")
         self.path, self.stamp = path, (st.st_mtime_ns, st.st_size)
         self.kind = path.rsplit(".", 1)[1].lower()
         self.lock = threading.Lock()
+        self.users, self.retired, self.closed = 0, False, False
+        self._ids = self._ts = None
         if self.kind == "raw":
             self.raw = rawdata.RawFile(path)
-            self.header = self.raw.header
-            self.n = len(self.raw.index())
-            self.truncated = self.raw.truncated
-        else:
-            import uproot
-            self.root = uproot.open(path)
             try:
-                self.tree = self.root["events"]
-                self.header = json.loads(str(self.root["settings"])) if "settings" in self.root else {}
-            except Exception as err:            # uproot raises many kinds for files of other programs
-                self.root.close()
-                raise rawdata.RawFormatError(f"{os.path.basename(path)} is not a ROOT file of Vx27webDAQ ({err})") from None
-            if self.header.get("format") == "alab-daq-built":
-                self.root.close()
-                raise rawdata.RawFormatError(f"{os.path.basename(path)} holds every board of a run per trigger: open it in "
-                                             "ROOT (TTree events); the page shows one board's files")
-            self.n = int(self.tree.num_entries)
-            self.truncated = bool(self.header.get("truncated"))
-            self.channels = sorted(int(k[2:]) for k in self.tree.keys() if k.startswith("ch") and k[2:].isdigit())
+                self.header = self.raw.header
+                if not isinstance(self.header, dict):
+                    raise rawdata.RawFormatError(f"{os.path.basename(path)}: its header is not a JSON object")
+                self.n = len(self.raw.index())
+                self.truncated = self.raw.truncated
+            except BaseException:
+                self.raw.close()
+                raise
+        else:
+            self._open_root(path)
+        cfg = self.header.get("config")
         try:
-            self.cfg = C.from_dict(self.header["config"]) if isinstance(self.header.get("config"), dict) else None
-        except C.ConfigError:
+            self.cfg = C.from_dict(cfg) if isinstance(cfg, dict) else None
+        except Exception:                    # noqa: BLE001 - a configuration of another version or a damaged one
             self.cfg = None
-        self.board_header = self.header.get("board", {}) or {}
+        self.board_header = _clean_board(self.header.get("board"))
         name = self.board_header.get("name")
         self.board = self.cfg.board(name) if self.cfg and name else None
         note = _side_note(path) if self.kind == "raw" else _side_note(path[:-5] + ".raw")
         self.note = note if note is not None else str(self.header.get("note") or "")
-        self._ids = None
 
-    def find_trigger(self, trigger_id: int) -> int | None:
-        """The number of the event with this trigger ID (the first, if the 24-bit IDs went round), or None."""
+    def _open_root(self, path: str) -> None:
+        import uproot
+        name = os.path.basename(path)
+        try:
+            self.root = uproot.open(path)
+        except OSError:
+            raise
+        except Exception as err:            # noqa: BLE001 - uproot raises many kinds for files of other programs
+            raise rawdata.RawFormatError(f"{name} is not a ROOT file of Vx27webDAQ ({err})") from None
+        try:                                 # everything that reads the file in here: a failure closes it again
+            self.tree = self.root["events"]
+            header = json.loads(str(self.root["settings"])) if "settings" in self.root else {}
+            if not isinstance(header, dict):
+                raise rawdata.RawFormatError(f"{name}: its settings are not a JSON object")
+            if header.get("format") == "alab-daq-built":
+                raise rawdata.RawFormatError(f"{name} holds every board of a run per trigger: open it in ROOT (TTree "
+                                             "events); the page shows one board's files")
+            keys = set(self.tree.keys())
+            lacking = [k for k in ("trigger_id", "timestamp", "ch_mask") if k not in keys]
+            if lacking:
+                raise rawdata.RawFormatError(f"{name} is not a ROOT file of Vx27webDAQ (no {', '.join(lacking)} branch)")
+            self.header = header
+            self.n = int(self.tree.num_entries)
+            self.truncated = bool(header.get("truncated"))
+            self.channels = sorted(int(k[2:]) for k in keys if k.startswith("ch") and k[2:].isdigit() and int(k[2:]) < 64)
+        except rawdata.RawFormatError:
+            self.root.close()
+            raise
+        except Exception as err:            # noqa: BLE001
+            self.root.close()
+            raise rawdata.RawFormatError(f"{name} is not a ROOT file of Vx27webDAQ ({err})") from None
+
+    # ---- the run it belongs to ----
+    def run_name(self) -> str | None:
+        """The run's name from the header, only when it is a run's name (runNNNNN): it is used in file names."""
+        run = self.header.get("run")
+        return run if isinstance(run, str) and RUN_NAME.match(run) else None
+
+    def file_index(self) -> int:
+        k = self.header.get("file_index")
+        return k if isinstance(k, int) and not isinstance(k, bool) and k >= 0 else 0
+
+    def sync_window_ns(self) -> float:
+        w = self.cfg.run.sync_window_ns if self.cfg else None
+        return float(w) if isinstance(w, (int, float)) and w > 0 else float(DEFAULT_SYNC_WINDOW_NS)
+
+    def same_clock(self) -> bool:
+        """The boards of its run ran on one clock (a chain of several boards): their timestamps can be compared."""
+        sync = self.cfg.run.sync if self.cfg else self.header.get("sync")
+        return sync == "chain" and (self.cfg is None or len(self.cfg.active()) > 1)
+
+    # ---- events ----
+    def timestamps(self) -> tuple[np.ndarray, np.ndarray]:
+        """(every event's timestamp in order, the event numbers in that order)."""
         with self.lock:
-            if self._ids is None:
-                if self.kind == "raw":
-                    ids = self.raw.headers()["trigger_id"].astype(np.int64)
-                else:
-                    ids = np.asarray(self.tree["trigger_id"].array(library="np"), dtype=np.int64)
-                order = np.argsort(ids, kind="stable")
-                self._ids = (ids[order], order)
-        s, order = self._ids
-        i = int(np.searchsorted(s, trigger_id))
-        return int(order[i]) if i < len(s) and s[i] == trigger_id else None
+            if self._ts is None:
+                try:
+                    if self.kind == "raw":
+                        ts = self.raw.headers()["timestamp"].astype(np.int64)
+                    else:
+                        ts = np.asarray(self.tree["timestamp"].array(library="np"), dtype=np.int64)
+                except rawdata.RawFormatError:
+                    raise
+                except Exception as err:     # noqa: BLE001
+                    raise rawdata.RawFormatError(f"{os.path.basename(self.path)}: the timestamps cannot be read ({err})") from None
+                order = np.argsort(ts, kind="stable")
+                self._ts = (ts[order], order)
+        return self._ts
+
+    def nearest(self, timestamp: int) -> tuple[int, int] | None:
+        """(the number of the event nearest in time to this timestamp, how far it is in timestamp units), or None for
+        a file without events."""
+        ts, order = self.timestamps()
+        if not len(ts):
+            return None
+        i = int(np.searchsorted(ts, timestamp))
+        best = None
+        for j in (i - 1, i):
+            if 0 <= j < len(ts):
+                d = abs(int(ts[j]) - int(timestamp))
+                if best is None or d < best[1]:
+                    best = (int(order[j]), d)
+        return best
 
     def enabled(self) -> list[bool]:
         """Per channel: read out in the run (from the configuration in the header, else from the first event)."""
@@ -343,31 +440,94 @@ class OpenFile:
         if not 0 <= k < self.n:
             raise IndexError(f"event {k} of {self.n}")
         with self.lock:
+            if self.closed:
+                raise rawdata.RawFormatError(f"{os.path.basename(self.path)} was closed: open it again")
             if self.kind == "raw":
                 return self.raw.event(k)
-            names = ["trigger_id", "timestamp", "ch_mask"] + [f"ch{c}" for c in self.channels]
-            arr = self.tree.arrays(names, entry_start=k, entry_stop=k + 1, library="np")
-            mask = int(arr["ch_mask"][0])
-            chans = [c for c in self.channels if mask >> c & 1]
-            waves = np.stack([np.asarray(arr[f"ch{c}"][0], dtype=np.uint16) for c in chans]) if chans \
-                else np.zeros((0, 0), np.uint16)
-            return rawdata.ScopeEvent(int(arr["trigger_id"][0]), int(arr["timestamp"][0]), 0, 0, False, mask, chans, waves)
+            try:
+                names = ["trigger_id", "timestamp", "ch_mask"] + [f"ch{c}" for c in self.channels]
+                arr = self.tree.arrays(names, entry_start=k, entry_stop=k + 1, library="np")
+                mask = int(arr["ch_mask"][0])
+                chans = [c for c in self.channels if mask >> c & 1]
+                waves = np.stack([np.asarray(arr[f"ch{c}"][0], dtype=np.uint16) for c in chans]) if chans \
+                    else np.zeros((0, 0), np.uint16)
+                return rawdata.ScopeEvent(int(arr["trigger_id"][0]), int(arr["timestamp"][0]), 0, 0, False, mask, chans, waves)
+            except Exception as err:         # noqa: BLE001 - a damaged ROOT file
+                raise rawdata.RawFormatError(f"{os.path.basename(self.path)}: event {k} cannot be read ({err})") from None
 
     def lines(self) -> dict:
         return board_lines(self.cfg, self.board, header_board=self.board_header)
 
     def settings(self) -> dict:
-        b = self.board_header
-        return {"source": "file", "run": self.header.get("run"), "run_dir": self.header.get("run_folder"),
+        b, h = self.board_header, self.header
+        text = lambda key: h.get(key) if isinstance(h.get(key), str) else None      # noqa: E731
+        return {"source": "file", "run": text("run"), "run_dir": text("run_folder"),
                 "board": b.get("name"), "model": b.get("model"), "serial": b.get("serial"), "note": self.note,
-                "setup": self.header.get("trigger_setup"), "sync": self.header.get("sync"),
-                "simulator": bool(self.header.get("simulator")), "created": self.header.get("created")}
+                "setup": text("trigger_setup"), "sync": text("sync"),
+                "simulator": bool(h.get("simulator")), "created": text("created")}
+
+    def hk_columns(self) -> dict | None:
+        """The ROOT file's hk tree (the board's housekeeping), or None."""
+        if self.kind != "root":
+            return None
+        with self.lock:
+            try:
+                if "hk" not in self.root:
+                    return None
+                tree = self.root["hk"]
+                return {k: np.asarray(tree[k].array(library="np"), dtype=np.float64) for k in tree.keys()}
+            except Exception:                # noqa: BLE001
+                return None
 
     def close(self) -> None:
-        if self.kind == "raw":
-            self.raw.close()
-        else:
-            self.root.close()
+        with self.lock:
+            if self.closed:
+                return
+            self.closed = True
+            if self.kind == "raw":
+                self.raw.close()
+            else:
+                self.root.close()
+
+
+class TextExport:
+    """Events of a data file as text (WaveDump2's ASCII file), made one event at a time while it is sent: per event
+    the header lines, then one row per sample with a column per channel."""
+
+    def __init__(self, files: "DataFiles", f: OpenFile, first: int, last: int, channels: list[int]):
+        self.files, self.f, self.first, self.last, self.channels = files, f, first, last, channels
+        base = os.path.splitext(os.path.basename(f.path))[0]
+        self.name = f"{base}_events{first}-{last - 1}.txt"
+        self._released = False
+
+    def chunks(self):
+        f, info = self.f, self.f.lines()
+        yield "\n".join([f"# Vx27webDAQ text export of {os.path.basename(f.path)}: board {f.board_header.get('name')}"
+                         f" ({f.board_header.get('model')}), run {f.settings()['run']}, events {self.first} to {self.last - 1}",
+                         "# per event: Event number, Timestamp (8 ns ticks), Samples, Sampling period (us), Channels;"
+                         " then one row per sample, one column per channel (ADC counts)"]) + "\n"
+        total = 0
+        for k in range(self.first, self.last):
+            ev = f.event(k)
+            chans = [c for c in (self.channels or ev.channels) if c in ev.channels]
+            waves = [ev.waveform(c) for c in chans]
+            n = len(waves[0]) if waves else 0
+            total += n * len(chans)
+            if total > EXPORT_MAX_SAMPLES:
+                yield "# stopped here: too many samples for one text file (ask for fewer events or channels)\n"
+                return
+            head = [f"Event number: {k}", f"Timestamp: {ev.timestamp}", f"Samples: {n}",
+                    f"Sampling period: {info['sample_ns'] / 1000:g}", "Channels: " + " ".join(str(c) for c in chans)]
+            buf = io.StringIO()
+            buf.write("\n".join(head) + "\n")
+            if waves:
+                np.savetxt(buf, np.stack(waves, axis=1).astype(np.int64), fmt="%d", delimiter="\t")
+            yield buf.getvalue()
+
+    def close(self) -> None:
+        if not self._released:
+            self._released = True
+            self.files.release(self.f)
 
 
 class DataFiles:
@@ -377,11 +537,14 @@ class DataFiles:
         self._open: OrderedDict[str, OpenFile] = OrderedDict()
         self._cache_size = cache_size
         self._lock = threading.Lock()
+        self._opening: dict[str, threading.Lock] = {}
 
-    def check(self, path: str, want_file: bool = True) -> str:
-        """The real path, if it lies inside a data folder; FileAccessError otherwise."""
-        if not path:
-            raise FileAccessError("no path given")
+    def check(self, path: str, want: str = "data") -> str:
+        """The real path, if it lies inside a data folder and is what is wanted: "data" a .raw or .root file, "file"
+        any regular file, "folder" a folder. A path outside the data folders: FileAccessError; not there:
+        FileNotFoundError."""
+        if not isinstance(path, str) or not path:
+            raise ValueError("no path given: choose a data file (or folder)")
         real = os.path.realpath(path)
         for _, root in self.roots():
             root = os.path.realpath(root)
@@ -389,14 +552,21 @@ class DataFiles:
                 break
         else:
             raise FileAccessError(f"{path} is not inside a data folder")
-        if want_file and not real.lower().endswith(DATA_SUFFIXES):
+        if want == "data" and not real.lower().endswith(DATA_SUFFIXES):
             raise FileAccessError(f"{path} is not a .raw or .root file")
+        if want == "new":                   # a file about to be written (it need not be there)
+            return real
+        st = os.stat(real)                   # never opened when it is not a regular file: a FIFO would block for ever
+        if want == "folder" and not stat.S_ISDIR(st.st_mode):
+            raise FileAccessError(f"{path} is not a folder")
+        if want != "folder" and not stat.S_ISREG(st.st_mode):
+            raise FileAccessError(f"{path} is not a data file (a folder or a special file)")
         return real
 
     def listing(self, folder: str) -> dict:
-        folder = self.check(folder, want_file=False)
-        if not os.path.isdir(folder):
-            raise FileAccessError(f"{folder} is not a folder")
+        """The folders and the data files of a data folder (only folders and regular files), the newest files first,
+        at most BROWSE_LIMIT entries ("more": true when there were more)."""
+        folder = self.check(folder, want="folder")
         entries = []
         with os.scandir(folder) as it:
             for e in it:
@@ -406,170 +576,239 @@ class DataFiles:
                     st = e.stat()
                 except OSError:
                     continue
-                if e.is_dir():
+                if stat.S_ISDIR(st.st_mode):
                     entries.append({"name": e.name, "kind": "folder", "mtime": st.st_mtime})
-                elif e.name.lower().endswith(DATA_SUFFIXES):
+                elif stat.S_ISREG(st.st_mode) and e.name.lower().endswith(DATA_SUFFIXES):
                     entries.append({"name": e.name, "kind": e.name.rsplit(".", 1)[1].lower(), "size": st.st_size,
                                     "mtime": st.st_mtime})
         entries.sort(key=lambda x: (x["kind"] != "folder", -x["mtime"] if x["kind"] != "folder" else 0, x["name"]))
         parent = os.path.dirname(folder)
         try:
-            self.check(parent, want_file=False)
-        except FileAccessError:
+            self.check(parent, want="folder")
+        except (FileAccessError, OSError):
             parent = None
-        return {"folder": folder, "parent": parent, "entries": entries}
+        return {"folder": folder, "parent": parent, "entries": entries[:BROWSE_LIMIT],
+                "more": len(entries) > BROWSE_LIMIT, "more_count": max(0, len(entries) - BROWSE_LIMIT)}
 
-    def open(self, path: str) -> OpenFile:
-        """The file, kept open for the next requests (the 4 newest files); read again when it changed."""
+    # ---- the files kept open ----
+    def _acquire(self, path: str) -> OpenFile:
+        """The file, opened once and kept for the next requests (read again when it changed); release() it after use
+        (use() does). One request opens (and indexes) a file at a time; the others wait for it."""
         path = self.check(path)
         st = os.stat(path)
+        stamp = (st.st_mtime_ns, st.st_size)
         with self._lock:
             f = self._open.get(path)
-            if f is not None and f.stamp == (st.st_mtime_ns, st.st_size):
+            if f is not None and f.stamp == stamp:
+                f.users += 1
                 self._open.move_to_end(path)
                 return f
-        f = OpenFile(path)
-        with self._lock:
-            old = self._open.pop(path, None)
-            if old is not None:
-                old.close()
-            self._open[path] = f
-            while len(self._open) > self._cache_size:
-                self._open.popitem(last=False)[1].close()
-        return f
+            opening = self._opening.setdefault(path, threading.Lock())
+        with opening:
+            with self._lock:
+                f = self._open.get(path)
+                if f is not None and f.stamp == stamp:
+                    f.users += 1
+                    self._open.move_to_end(path)
+                    return f
+            new = OpenFile(path)
+            with self._lock:
+                old = self._open.pop(path, None)
+                if old is not None:
+                    self._retire(old)
+                new.users = 1
+                self._open[path] = new
+                self._trim()
+                self._opening.pop(path, None)
+                return new
 
+    def _retire(self, f: OpenFile) -> None:
+        f.retired = True
+        if f.users == 0:
+            f.close()
+
+    def _trim(self) -> None:
+        """Close the files used longest ago while the cache holds more than cache_size; a file in use stays (open
+        and in the cache) until its request is done, so one request may use more files than the cache holds."""
+        unused = [p for p, f in self._open.items() if f.users == 0]
+        while len(self._open) > self._cache_size and unused:
+            self._retire(self._open.pop(unused.pop(0)))
+
+    def release(self, f: OpenFile) -> None:
+        with self._lock:
+            f.users -= 1
+            if f.users <= 0:
+                f.users = 0
+                if f.retired:
+                    f.close()
+                else:
+                    self._trim()
+
+    @contextmanager
+    def use(self, path: str):
+        f = self._acquire(path)
+        try:
+            yield f
+        finally:
+            self.release(f)
+
+    # ---- for the page ----
     def info(self, path: str) -> dict:
-        f = self.open(path)
-        lines = f.lines()
-        return {"path": f.path, "kind": f.kind, "events": f.n, "size": f.stamp[1], "truncated": f.truncated,
-                "channels": len(lines["lines"]), "settings": f.settings(), "enabled": f.enabled(),
-                **{k: lines[k] for k in ("record_length", "pre_trigger", "sample_ns", "adc_max", "model")}}
+        with self.use(path) as f:
+            lines = f.lines()
+            return {"path": f.path, "kind": f.kind, "events": f.n, "size": f.stamp[1], "truncated": f.truncated,
+                    "channels": len(lines["lines"]), "settings": f.settings(), "enabled": f.enabled(),
+                    **{k: lines[k] for k in ("record_length", "pre_trigger", "sample_ns", "adc_max", "model")}}
 
     def waveforms(self, path: str, k: int, channels: list[int], x0: int, x1: int | None, bins: int,
                   span: tuple[int, int] | None = None, full: bool = False) -> dict:
-        f = self.open(path)
-        ev = f.event(k) if f.n else None
-        info = f.lines()
-        out = []
-        for c in channels:
-            if not 0 <= c < len(info["lines"]):
-                continue
-            enabled = f.board.channels[c].enabled if f.board and c < len(f.board.channels) else \
-                bool(ev is not None and c in ev.channels)
-            samples = ev.waveform(c) if ev is not None else None
-            out.append(channel_view(samples, enabled, c, k, info["record_length"], x0, x1, bins, info["lines"][c],
-                                    span, info["sample_ns"], full))
-        return {"source": "file", "path": f.path, "event": k, "events": f.n, "board": f.board_header.get("name"),
-                "trigger_id": ev.trigger_id if ev is not None else None,
-                "timestamp": ev.timestamp if ev is not None else None,
-                "settings": {**f.settings(), **{x: info[x] for x in ("record_length", "pre_trigger", "sample_ns",
-                                                                     "adc_max", "model")}, "mv_per_adc": mv_per_adc(info)},
-                "channels": out, "n_channels": len(info["lines"])}
+        with self.use(path) as f:
+            ev = f.event(k) if f.n else None
+            info = f.lines()
+            out = []
+            for c in channels:
+                if not 0 <= c < len(info["lines"]):
+                    continue
+                enabled = f.board.channels[c].enabled if f.board and c < len(f.board.channels) else \
+                    bool(ev is not None and c in ev.channels)
+                samples = ev.waveform(c) if ev is not None else None
+                out.append(channel_view(samples, enabled, c, k, info["record_length"], x0, x1, bins, info["lines"][c],
+                                        span, info["sample_ns"], full))
+            return {"source": "file", "path": f.path, "event": k, "events": f.n, "board": f.board_header.get("name"),
+                    "trigger_id": ev.trigger_id if ev is not None else None,
+                    "timestamp": ev.timestamp if ev is not None else None,
+                    "settings": {**f.settings(), **{x: info[x] for x in ("record_length", "pre_trigger", "sample_ns",
+                                                                         "adc_max", "model")}, "mv_per_adc": mv_per_adc(info)},
+                    "channels": out, "n_channels": len(info["lines"])}
 
     def hk(self, path: str) -> dict:
-        """The housekeeping of the board of this data file (its RUN_BOARD_hk.csv beside it)."""
-        f = self.open(path)
-        hk = rootconv.hk_path(f.path, f.header)
-        out = {"board": f.board_header.get("name"), "model": f.board_header.get("model"), "run": f.header.get("run")}
-        if not os.path.isfile(hk):
-            return {**out, "path": hk, "rows": 0, "columns": {}, "missing": True}
-        return {**out, **hk_table(hk)}
+        """The housekeeping of the board of this data file: its RUN_BOARD_hk.csv beside it, else the hk tree of its
+        ROOT file (only the ROOT files were copied). The file names come from the header, so only a run's name
+        (runNNNNN) and a board's name are used, and the files must lie inside a data folder too."""
+        with self.use(path) as f:
+            out = {"board": f.board_header.get("name"), "model": f.board_header.get("model"), "run": f.settings()["run"]}
+            run, board = f.run_name(), f.board_header.get("name")
+            folder = os.path.dirname(f.path)
+            csv = os.path.join(folder, f"{run}_{board}_hk.csv") if run and board and C.NAME_RE.match(board) else ""
+            if csv:
+                try:
+                    return {**out, **hk_table(self.check(csv, want="file"))}
+                except (OSError, ValueError):     # not there (or not a data folder's file): the ROOT file's copy
+                    pass
+            cols, source = f.hk_columns(), f.path
+            roots = [p for p in (f.path[:-4] + ".root" if f.kind == "raw" else "",
+                                 os.path.join(folder, f"{run}_{board}.root") if csv else "") if p and p != f.path]
+            for root in roots if cols is None else []:
+                try:
+                    with self.use(root) as g:
+                        cols, source = g.hk_columns(), g.path
+                except (OSError, ValueError):
+                    continue
+                if cols is not None:
+                    break
+            if cols:
+                return {**out, **hk_columns(source, cols), "from_root": True}
+            return {**out, "path": csv, "rows": 0, "columns": {}, "missing": True}
 
-    def export_text(self, path: str, first: int, count: int, channels: list[int]) -> tuple[str, str]:
-        """Events first … first+count-1 of a data file as text (WaveDump2's ASCII file): per event the header
-        lines, then one row per sample with a column per channel; (text, file name)."""
-        f = self.open(path)
-        info = f.lines()
-        last = min(f.n, first + count)
-        if first >= f.n:
-            raise IndexError(f"event {first} of {f.n}")
-        out = [f"# Vx27webDAQ text export of {os.path.basename(f.path)}: board {f.board_header.get('name')}"
-               f" ({f.board_header.get('model')}), run {f.header.get('run')}, events {first} to {last - 1}",
-               "# per event: Event number, Timestamp (8 ns ticks), Samples, Sampling period (us), Channels;"
-               " then one row per sample, one column per channel (ADC counts)"]
-        total = 0
-        for k in range(first, last):
-            ev = f.event(k)
+    def export_open(self, path: str, first: int, count: int, channels: list[int]) -> TextExport:
+        """Events first … first+count-1 of a data file as text, made while it is sent (TextExport.chunks()); close()
+        the export when it is done."""
+        f = self._acquire(path)
+        try:
+            if first >= f.n:
+                raise IndexError(f"event {first} of {f.n}")
+            last = min(f.n, first + count)
+            ev = f.event(first)
             chans = [c for c in (channels or ev.channels) if c in ev.channels]
-            waves = [ev.waveform(c) for c in chans]
-            n = len(waves[0]) if waves else 0
-            total += n * len(chans)
-            if total > 20_000_000:
+            n = len(ev.waveform(chans[0])) if chans else 0
+            if n * len(chans) * (last - first) > EXPORT_MAX_SAMPLES:
                 raise ValueError("too many samples for one text file: ask for fewer events or channels")
-            out += [f"Event number: {k}", f"Timestamp: {ev.timestamp}", f"Samples: {n}",
-                    f"Sampling period: {info['sample_ns'] / 1000:g}", "Channels: " + " ".join(str(c) for c in chans)]
-            if waves:
-                block = np.stack(waves, axis=1)
-                out += ["\t".join(str(int(v)) for v in row) for row in block]
-        base = os.path.splitext(os.path.basename(f.path))[0]
-        return "\n".join(out) + "\n", f"{base}_events{first}-{last - 1}.txt"
+            return TextExport(self, f, first, last, channels)
+        except BaseException:
+            self.release(f)
+            raise
 
-    def run_files(self, f: OpenFile) -> dict[str, list[OpenFile]]:
-        """The files of the same run as f in its folder, one board each (in parts: _001, ...): {board: [files]}."""
-        run, folder, suffix = f.header.get("run"), os.path.dirname(f.path), "." + f.kind
+    def _run_files(self, f: OpenFile) -> tuple[dict[str, list[OpenFile]], list[OpenFile]]:
+        """The files of the same run as f in its folder, one board each (in parts: _001, ...): ({board: [files]},
+        the files held for this request, to release())."""
+        run, folder, suffix = f.run_name(), os.path.dirname(f.path), "." + f.kind
         out: dict[str, list] = {}
+        held: list[OpenFile] = []
         if not run:
-            return {f.board_header.get("name") or "?": [f]}
+            return {f.board_header.get("name") or "?": [f]}, held
         for name in sorted(os.listdir(folder)):
             if not (name.startswith(f"{run}_") and name.lower().endswith(suffix)):
                 continue
-            try:
-                g = f if os.path.join(folder, name) == f.path else self.open(os.path.join(folder, name))
-            except (OSError, rawdata.RawFormatError, FileAccessError):
-                continue
-            if g.header.get("run") != run:
+            path = os.path.join(folder, name)
+            if path == f.path:
+                g = f
+            else:
+                try:
+                    g = self._acquire(path)
+                except (OSError, ValueError):
+                    continue
+                held.append(g)
+            if g.run_name() != run:
                 continue
             out.setdefault(g.board_header.get("name") or "?", []).append(g)
         for files in out.values():
-            files.sort(key=lambda g: int(g.header.get("file_index") or 0))
-        return out
+            files.sort(key=lambda g: g.file_index())
+        return out, held
 
     def combined(self, path: str, k: int, traces: list[tuple[str, int]], t_lo: float | None, t_hi: float | None,
                  bins: int, yunit: str, align: str) -> dict:
-        """The combined view of a run's files: event k of the file given, and the event with its trigger ID in
-        the files of the run's other boards."""
-        f = self.open(path)
-        ev = f.event(k) if f.n else None
-        own = f.board_header.get("name") or "?"
-        by_board = self.run_files(f)
-        entries, missing = [], []
-        for name in dict.fromkeys(b for b, _ in traces):
-            files = by_board.get(name)
-            if not files:
-                continue
-            if name == own:
-                e = ev
-            else:
-                e = None
-                for g in files if ev is not None else []:
-                    j = g.find_trigger(ev.trigger_id)
-                    if j is not None:
-                        e = g.event(j)
-                        break
-                if e is None:
-                    missing.append(name)
-            g = files[0]
-            entries.append({"name": name, "info": g.lines(), "ev": e, "enabled": g.enabled()})
-        out = combined_view(entries, traces, t_lo, t_hi, bins, yunit, align)
-        out.update(source="file", path=f.path, event=k, events=f.n, board=own, missing=missing, run=f.header.get("run"),
-                   matched=not missing, available=[{"name": n, "channels": len(fs[0].lines()["lines"]),
-                                                    "enabled": fs[0].enabled(), "model": fs[0].board_header.get("model")}
-                                                   for n, fs in by_board.items()])
-        return out
+        """The combined view of a run's files: event k of the file given, and for every other board of the run the
+        event nearest in time (the boards share one clock in a chain), when it is within the run's sync window
+        (1000 ns when the file does not say): like the event builder. A board without one is "not matched"; so is
+        every other board of a run whose boards had clocks of their own."""
+        with self.use(path) as f:
+            ev = f.event(k) if f.n else None
+            own = f.board_header.get("name") or "?"
+            by_board, held = self._run_files(f)
+            try:
+                window_ns, same_clock = f.sync_window_ns(), f.same_clock()
+                entries, missing = [], []
+                for name in dict.fromkeys(b for b, _ in traces):
+                    files = by_board.get(name)
+                    if not files:
+                        continue
+                    if name == own:
+                        e = ev
+                    else:
+                        e, best = None, None
+                        for g in files if ev is not None and same_clock else []:
+                            hit = g.nearest(ev.timestamp)
+                            if hit is not None and (best is None or hit[1] < best[2]):
+                                best = (g, hit[0], hit[1])
+                        if best is not None and best[2] * rawdata.TIMESTAMP_NS <= window_ns:
+                            e = best[0].event(best[1])
+                        if e is None:
+                            missing.append(name)
+                    g = files[0]
+                    entries.append({"name": name, "info": g.lines(), "ev": e, "enabled": g.enabled()})
+                out = combined_view(entries, traces, t_lo, t_hi, bins, yunit, align)
+                out.update(source="file", path=f.path, event=k, events=f.n, board=own, missing=missing,
+                           run=f.settings()["run"], matched=not missing, window_ns=window_ns, same_clock=same_clock,
+                           available=[{"name": n, "channels": len(fs[0].lines()["lines"]), "enabled": fs[0].enabled(),
+                                       "model": fs[0].board_header.get("model")} for n, fs in by_board.items()])
+                return out
+            finally:
+                for g in held:
+                    self.release(g)
 
     def overview(self, path: str) -> dict:
         """Per channel baseline, noise and peak, from up to SUMMARY_EVENTS events spread over the file."""
-        f = self.open(path)
-        picks = sorted(set(np.linspace(0, f.n - 1, min(f.n, SUMMARY_EVENTS)).astype(int).tolist())) if f.n else []
-        events = [f.event(k) for k in picks]
-        n_ch = len(f.lines()["lines"])
-        return {"source": "file", "path": f.path, "boards": [{"name": f.board_header.get("name") or "?",
-                                                             "model": f.board_header.get("model"), "channels": n_ch,
-                                                             "summary": event_summary(events, n_ch)}],
-                "events": f.n, "settings": f.settings()}
+        with self.use(path) as f:
+            picks = sorted(set(np.linspace(0, f.n - 1, min(f.n, SUMMARY_EVENTS)).astype(int).tolist())) if f.n else []
+            events = [f.event(k) for k in picks]
+            n_ch = len(f.lines()["lines"])
+            return {"source": "file", "path": f.path, "boards": [{"name": f.board_header.get("name") or "?",
+                                                                 "model": f.board_header.get("model"), "channels": n_ch,
+                                                                 "summary": event_summary(events, n_ch)}],
+                    "events": f.n, "settings": f.settings()}
 
     def close_all(self) -> None:
         with self._lock:
             for f in self._open.values():
-                f.close()
+                self._retire(f)
             self._open.clear()

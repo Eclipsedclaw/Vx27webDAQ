@@ -31,7 +31,9 @@ export default {
       if (!hist.length && !(R && R.busy)) rows.push(h("div.empty-state", icon("refresh"), t("No conversions yet.")));
       for (const r of [...hist].reverse()) {
         rows.push(h("div.row.nowrap", h(`span.led.${r.status === "ok" ? "ok" : r.status === "cancelled" ? "" : "warn"}`),
-                    h("span.grow.break.small", `${basename(r.root || r.raw)} · ${t(r.status)}${r.status === "ok" ? ` · ${fmtInt(r.events_root)} ${t("events")}` : ""}`),
+                    h("span.grow.break.small", { title: r.message || "" },
+                      `${basename(r.root || r.raw)} · ${t(r.status)}${r.status === "ok" ? ` · ${fmtInt(r.events_root)} ${t("events")}` : ""}` +
+                      (r.status === "skipped" && r.message ? ` · ${r.message}` : "")),
                     h("span.hint.nowrap", `${r.by || "?"} · ${fmtClock(r.time).slice(11)}`)));
       }
       clear(box, rows);
