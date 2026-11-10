@@ -615,6 +615,26 @@ class DataFileTests(FixTestCase):
             self.assertEqual([b["timestamp"] for b in res["boards"]], [[100, 101], [200, 201]][event])
         self.assertLessEqual(len(self.station.files._open), 16)         # the cache is back to its size
 
+    async def test_a_file_lists_its_runs_boards(self):
+        """Opening one board's file of a run (the waveform view) lists every board's file of that run beside it, the
+        master first (the run's order), each board's part of the same number (else its first); found by the names
+        alone, so only the file opened is open; not the event-built file, not another run's files."""
+        write_raw(self.data("run00005_b1.raw"), "run00005", "b1", [(1, 100), (2, 200)], model="V2730")
+        write_raw(self.data("run00005_b0.raw"), "run00005", "b0", [(1, 100)])
+        write_raw(self.data("run00005_b0_001.raw"), "run00005", "b0", [(3, 300)], file_index=1)
+        write_raw(self.data("run00005_b1_001.raw"), "run00005", "b1", [(3, 300)], file_index=1, model="V2730")
+        write_raw(self.data("run00005_a2.raw"), "run00005", "a2", [(1, 100)])     # not in the run's configuration: last
+        write_raw(self.data("run00006_b0.raw"), "run00006", "b0", [(1, 100)])     # another run
+        open(self.data("run00005_built.raw"), "wb").close()                       # not a board's file
+        before = len(self.station.files._open)
+        res = await (await self.client.get("/api/files/info", params={"path": self.data("run00005_b0.raw")})).json()
+        self.assertEqual([(r["board"], os.path.basename(r["path"])) for r in res["run_files"]],
+                         [("b0", "run00005_b0.raw"), ("b1", "run00005_b1.raw"), ("a2", "run00005_a2.raw")])
+        self.assertEqual(len(self.station.files._open), before + 1)              # only the file opened
+        res = await (await self.client.get("/api/files/info", params={"path": self.data("run00005_b1_001.raw")})).json()
+        self.assertEqual([os.path.basename(r["path"]) for r in res["run_files"]],
+                         ["run00005_b0_001.raw", "run00005_b1_001.raw", "run00005_a2.raw"])
+
     async def test_combined_view_pairs_by_time(self):
         """C8: the other board's event is the one nearest in time within the sync window, not the one with the same
         24-bit trigger ID (which came round again, or belongs to a board that triggers by itself)."""

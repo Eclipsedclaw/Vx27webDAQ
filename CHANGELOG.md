@@ -5,6 +5,10 @@ What changed in each version of Vx27webDAQ (ALAB DAQ until v0.0.18). Write the n
 
 ## Unreleased
 
+## v0.1.32 (2026-11-10)
+
+- Every board's file of a run: a file opened on the Run page (Source: File) brings the other boards of its run. The Board menu lists every board's file beside it (in the run's order, the master first; the part of the same number), and choosing a board opens its file at the same event number, as the Board menu does live; before, a file showed its own board only, and each board's file had to be opened by hand. The files are found by their names (RUN_BOARD.raw, RUN_BOARD_001.raw, …), so each one is opened, and uses memory, only when its board is chosen. `/api/files/info` gives `run_files`.
+
 ## v0.1.31 (2026-11-10)
 
 - Close a plot: each channel plot on the Run page has a close button (×). Its channel leaves the channels shown (as in Channels…), the server is no longer asked for it, and the page lets go of what the plot held: its waveform, the means or FFT sums, the histogram, the FFT or histogram plot, and at Pause its samples. The other plots keep their channel, means and histogram (before, a channel taken out moved the plots after it to other cards and their means began again). With every plot closed the page sends no waveform requests and says how to open plots again; a plot that shows no channel now holds nothing.

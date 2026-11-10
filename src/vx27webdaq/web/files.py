@@ -35,6 +35,7 @@ SUMMARY_EVENTS = 200
 MAX_TRACES = 16                 # the combined view: at most this many channels in one plot
 Y_UNITS = ("mv", "adc", "raw")    # mV from the baseline, ADC counts from the baseline, raw ADC counts
 ALIGNS = ("trigger", "timestamp")  # time 0: each board's own trigger, or the first board's (timestamps)
+PART_NAME = re.compile(r"(?P<board>.+?)(?:_(?P<part>\d{3,}))?")     # BOARD or BOARD_001 of RUN_BOARD[_001].raw
 RUN_NAME = re.compile(r"^run\d{5,}$")  # a run's name, as the DAQ program makes it (file names are made from it)
 DEFAULT_SYNC_WINDOW_NS = 1000     # the combined view of files: the other boards' events within this time
 EXPORT_MAX_SAMPLES = 20_000_000   # a text export holds at most this many samples
@@ -658,7 +659,36 @@ class DataFiles:
             lines = f.lines()
             return {"path": f.path, "kind": f.kind, "events": f.n, "size": f.stamp[1], "truncated": f.truncated,
                     "channels": len(lines["lines"]), "settings": f.settings(), "enabled": f.enabled(),
+                    "run_files": self.run_boards(f),
                     **{k: lines[k] for k in ("record_length", "pre_trigger", "sample_ns", "adc_max", "model")}}
+
+    def run_boards(self, f: OpenFile) -> list[dict]:
+        """Every board's data file of the same run as f, in its folder: [{"board", "path"}] in the run's order (the
+        master first), each board's part of the same number as f (else its first), f itself for f's board. Found by
+        the file names alone (RUN_BOARD.raw, RUN_BOARD_001.raw, ...; not RUN_built.root), so nothing is opened, and
+        no memory is used, until a board is chosen."""
+        run, folder, suffix, own = f.run_name(), os.path.dirname(f.path), "." + f.kind, f.board_header.get("name")
+        if not run:
+            return []
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            names = []
+        parts: dict[str, dict[int, str]] = {}
+        for name in names:
+            if not (name.startswith(f"{run}_") and name.lower().endswith(suffix)):
+                continue
+            m = PART_NAME.fullmatch(name[len(run) + 1:len(name) - len(suffix)])
+            if m is None or m["board"] == "built" or not rawdata.name_part(m["board"]):
+                continue
+            parts.setdefault(m["board"], {})[int(m["part"] or 0)] = os.path.join(folder, name)
+        k = f.file_index()
+        out = {b: f.path if b == own else ps.get(k, ps[min(ps)]) for b, ps in parts.items()}
+        if isinstance(own, str) and own:
+            out[own] = f.path
+        order = [b.name for b in f.cfg.boards] if f.cfg else []
+        return [{"board": b, "path": p} for b, p in sorted(out.items(), key=lambda x: (order.index(x[0]) if x[0] in order
+                                                                                    else len(order), x[0]))]
 
     def waveforms(self, path: str, k: int, channels: list[int], x0: int, x1: int | None, bins: int,
                   span: tuple[int, int] | None = None, full: bool = False) -> dict:

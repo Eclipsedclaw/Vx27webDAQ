@@ -459,10 +459,14 @@ export function wavePanel(app, { onBoard } = {}) {
   }
 
   // ---- state of the controls ----
+  // a file: every board of its run (their files beside it, each opened only when chosen), else its own board alone
   function boards() {
     if (source === "file" && fileInfo) {
-      const s = fileInfo.settings || {};
-      return [{ name: s.board || "?", text: `${s.board || "?"} · ${s.model || fileInfo.model || ""}`, channels: fileInfo.channels }];
+      const s = fileInfo.settings || {}, own = s.board || "?";
+      const list = Array.isArray(fileInfo.run_files) && fileInfo.run_files.some((r) => r.board === own) ? fileInfo.run_files
+                                                                                                      : [{ board: own, path: file }];
+      return list.map((r) => ({ name: r.board, path: r.path, channels: fileInfo.channels,
+                                text: r.board === own ? `${own} · ${s.model || fileInfo.model || ""}` : r.board }));
     }
     if (liveBoards) return liveBoards.map((b) => ({ name: b.name, text: `${b.name} · ${b.model}`, channels: b.channels }));
     const cfg = app.state.config.config;              // until the server has said which boards the live view has
@@ -488,7 +492,8 @@ export function wavePanel(app, { onBoard } = {}) {
   }
 
   function fillBoards() {
-    const keep = boardSel.value || store("wave.board") || "";
+    const own = source === "file" && fileInfo ? (fileInfo.settings || {}).board || "?" : "";     // a file: its board
+    const keep = own || boardSel.value || store("wave.board") || "";
     const list = boards();
     clear(boardSel, list.map((b) => h("option", { value: b.name }, b.text)));
     if (list.some((b) => b.name === keep)) boardSel.value = keep;
@@ -499,6 +504,10 @@ export function wavePanel(app, { onBoard } = {}) {
   }
 
   function boardChanged() {
+    if (source === "file" && fileInfo) {               // another board of the file's run: its file, at the same event
+      const b = boards().find((x) => x.name === boardSel.value);
+      if (b && b.path && b.path !== file) { openFile(b.path, { sameRun: true }); return; }
+    }
     store("wave.board", boardSel.value);
     const b = boards().find((x) => x.name === boardSel.value);
     nChannels = b ? b.channels : nChannels;
@@ -589,7 +598,9 @@ export function wavePanel(app, { onBoard } = {}) {
     else showControls();
   }
 
-  async function openFile(path) {
+  // sameRun: another board's file of the run shown (the Board menu): the event number stays, and when it cannot be
+  // opened the file shown stays
+  async function openFile(path, { sameRun = false } = {}) {
     const my = ++opening;
     let info;
     try {
@@ -597,6 +608,7 @@ export function wavePanel(app, { onBoard } = {}) {
     } catch (err) {
       if (my !== opening || gone) return;             // something else was chosen meanwhile
       fail(err);
+      if (sameRun && fileInfo && source === "file") { fillBoards(); return; }
       source = "live";
       store("wave.source", "live");
       fileInfo = null;
@@ -612,8 +624,8 @@ export function wavePanel(app, { onBoard } = {}) {
     source = "file";
     store("wave.file", path);
     store("wave.source", "file");
-    eventNo = 0;
-    evInput.value = "0";
+    eventNo = sameRun ? Math.max(0, Math.min((info.events || 1) - 1, eventNo)) : 0;
+    evInput.value = String(eventNo);
     fillBoards();
     showCards();
     showControls();
