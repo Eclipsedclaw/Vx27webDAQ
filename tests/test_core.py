@@ -810,7 +810,8 @@ class RepositoryTests(unittest.TestCase):
         data = ["run00001_b0.raw", "elsewhere/run00001_b0_001.raw", "x/run00001_b0.root", "a.root.part", "live/b0.evt",
                 "data/run00001_b0.json", "runs/20261107_141418/config.json", "my_config.json", "ALAB_DAQ_data/a.json",
                 "ALAB_DAQ_runs/b/run.json", "status.json", "daq.log", "x.wbin", "caen/lib/libCAEN_Dig2.so",
-                "wheels/numpy.whl", "VX27_ENV/bin/python", ".test_tmp/core/a.raw", "src/vx27webdaq/__pycache__/a.pyc"]
+                "wheels/numpy.whl", "VX27_ENV/bin/python", ".test_tmp/core/a.raw", "src/vx27webdaq/__pycache__/a.pyc",
+                "mydata/run00001_b0_hk.csv", "x/live/combined.set", "x/control/1.done"]
         out = self.git("check-ignore", "--no-index", "--stdin", stdin="\n".join(data)).stdout.split()
         self.assertEqual(sorted(set(data) - set(out)), [])
         code = ["src/vx27webdaq/web/static/i18n/zh.json", "src/vx27webdaq/core/rawdata.py", "tests/test_core.py", "setup.sh",

@@ -26,6 +26,9 @@ __pycache__/
 *.h5
 *.hdf5
 *.log
+*.csv
+*.set
+*.done
 /data/
 /runs/
 ALAB_DAQ_data/

@@ -68,6 +68,22 @@ if git rev-parse -q --verify "refs/tags/v$new" >/dev/null; then
     fail "the tag v$new exists already"
 fi
 
+# The step changes CHANGELOG.md and __init__.py before it commits: if anything fails before the commit is made
+# (no git identity, a hook, a full disk), both are put back as they were, so the next try gets the same number.
+backup="$(mktemp -d)"
+cp -p "$log" "$init" "$backup/"
+committed=0
+restore() {
+    if [ "$committed" = 0 ]; then
+        cp -p "$backup/$(basename "$log")" "$log"
+        cp -p "$backup/$(basename "$init")" "$init"
+        git reset -q 2>/dev/null || true
+        echo "version.sh: nothing was committed; $log and $init are as they were" >&2
+    fi
+    rm -rf "$backup"
+}
+trap restore EXIT
+
 # CHANGELOG.md: the notes under "## Unreleased" move under "## vX.Y.Z (date)"; prints the first note
 subject="$(python3 -I - "$log" "v$new" "$(date +%Y-%m-%d)" "${notes[@]}" <<'PY'
 import re, sys
@@ -93,6 +109,12 @@ PY
 sed -i "s/^__version__ = \"$current\"\$/__version__ = \"$new\"/" "$init"
 body="$(awk -v head="## v$new " 'index($0, head) == 1 {on = 1; next} on && /^## / {exit} on' "$log")"
 git add -A
+added="$(git diff --cached --name-only --diff-filter=A)"
+if [ -n "$added" ]; then                      # new files go into git (and to GitHub once pushed): say which
+    echo "New files in this commit:"
+    echo "$added" | sed 's/^/  /'
+fi
 git commit -q -m "v$new: $subject" -m "$body" "${commit_options[@]}"
+committed=1
 git tag -a "v$new" -m "v$new: $subject"
 echo "v$current -> v$new: commit $(git rev-parse --short HEAD), tag v$new"

@@ -5,6 +5,10 @@ What changed in each version of Vx27webDAQ (ALAB DAQ until v0.0.18). Write the n
 
 ## Unreleased
 
+## v0.1.24 (2026-11-10)
+
+- Version script and ignored files: a version step that fails before its commit (no git identity, a hook, a full disk) puts CHANGELOG.md and `__init__.py` back as they were, so the next try gets the same number; a step that adds new files names them (they go to GitHub once pushed). The boards' housekeeping tables (`*.csv`), the live combined event (`*.set`) and the run's control answers (`*.done`) stay out of git, wherever they land; the repository test checks them.
+
 ## v0.1.23 (2026-11-09)
 
 - Simulator: a command takes its time under the crate lock (a reader could produce events past the moment of a stop that the other boards then lacked: the rare failure of the logic-OR test, one board with one trigger more); a test checks it.
